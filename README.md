@@ -1,0 +1,50 @@
+# RF CIP Mobile Field Control V1
+
+RF CIP(겹침 CIP) 전문건설 현장의 **천공번호 기반 통합 현장관리 + 카카오톡 보고** 시스템.
+
+> 최상위 개발 기준: [`docs/MASTER_PROMPT.md`](docs/MASTER_PROMPT.md)
+> 개발 규칙 요약: [`CLAUDE.md`](CLAUDE.md)
+
+## 현재 진행상황
+
+| Phase | 내용 | 상태 |
+|---|---|---|
+| PHASE 1 | 프로젝트 구조 / DB / 권한 | ✅ 완료 — [보고서](docs/PHASE_01_REPORT.md) |
+| PHASE 2 | SITE + CONTRACT + HOLE MASTER | 대기 |
+| PHASE 3 | GROUND_TYPE + GROUND_PROFILE + 범위입력 | 대기 |
+| PHASE 4~15 | — | 대기 |
+
+## 로컬 실행
+
+```bash
+# 1) PostgreSQL 16 준비 후 접속정보 설정
+cp server/.env.example server/.env    # 값 수정
+
+# 2) 의존성 설치
+npm --prefix server install
+
+# 3) DB 생성 + 마이그레이션 + 테스트 현장 시드
+npm --prefix server run db:reset
+
+# 4) 자동 테스트 (권한/검증 포함)
+npm --prefix server run test
+
+# 5) 개발 서버
+npm --prefix server run dev
+```
+
+테스트 계정 (시드): `head01`(본사) / `field01`,`field02`(현장관리자) / `partner01`(계약상대방)
+비밀번호는 모두 `test1234!` — **운영에서 사용 금지**.
+
+## 디렉터리
+
+```
+db/migrations/     번호순 SQL 마이그레이션 (스키마·권한·검증의 단일 원천)
+server/src/db/     접속풀(역할강등) / 마이그레이션 러너 / 시드
+server/src/auth/   비밀번호 해시, JWT
+server/src/http/   인증·역할 미들웨어, 오류 매핑
+server/src/routes/ REST API
+server/tests/      권한/지반조건/API 자동 테스트
+storage/           로컬 파일 저장소 (도면·사진·영수증)
+docs/              Master Prompt 및 Phase 보고서
+```
