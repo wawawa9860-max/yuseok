@@ -46,8 +46,19 @@ describe('§7 지층종류는 현장별 사용자 정의', () => {
     const bySite = new Map(rows.map((r) => [r.site_code, r.types]));
     expect(bySite.get('TEST_SITE_01')).toHaveLength(2);
     expect(bySite.get('TEST_SITE_02')).toHaveLength(3);
-    // 실제 수량산출서 현장: 연암·경암 열은 전 공 0 이므로 등록되지 않는다
-    expect(bySite.get('SAMPLE_RFCIP_01')).toEqual(['토사', '풍화암']);
+
+    // 계획수량이 있는 지층만 세면 2종이다
+    const confirmed = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT g.name FROM core.ground_type g JOIN core.site s ON s.id=g.site_id
+          WHERE s.site_code='SAMPLE_RFCIP_01' AND g.status='CONFIRMED'
+          ORDER BY g.sort_order`);
+      return r.rows.map((x: { name: string }) => x.name);
+    });
+    expect(confirmed).toEqual(['토사', '풍화암']);
+    // 실제 수량산출서 현장: 연암·경암은 전 공 0 이지만 지워버리지 않고
+    // PROVISIONAL(미확정)로 보존한다 (사용자 지시: "우선 0으로 입력해놓은 상황")
+    expect(bySite.get('SAMPLE_RFCIP_01')).toEqual(['토사', '풍화암', '연암', '경암']);
   });
 });
 

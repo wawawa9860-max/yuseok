@@ -28,6 +28,9 @@ Master Prompt는 사용자의 명시적 지시 없이 수정하지 않는다.
 - **천공번호 형식을 강제하지 않는다.** 작업도면(PDF)에 표기된 원문을 그대로 저장한다.
   정렬·범위선택은 항상 `sort_key`(= `core.fn_natural_sort_key`) 로 한다. TS 구현과 규칙이 반드시 같아야 한다.
 - **지반조건 = 조합 + 깊이 구조.** 텍스트 한 줄로 저장 금지.
+- **계획수량 0인 지층을 지우지 않는다.** `ground_type.status='PROVISIONAL'` 로 보존한다.
+  현장 여건에 따라 나중에 출현할 수 있으므로 근거를 남긴다.
+- **범위 일괄적용·환산·공별입력은 전부 미리보기 API를 먼저 거친다.** 시스템이 임의 확정 금지(§11).
 - **지층별 길이 합계 = 총 계획심도** 를 코드로 검증한다.
 - **PRIVATE_COST는 DB 권한으로 차단한다.** 프론트 숨김만으로 구현 금지.
 - **share 스키마(외부 공유)는 private_cost에 어떤 의존도 가질 수 없다.** 자동 테스트로 강제된다.
@@ -42,7 +45,7 @@ Master Prompt는 사용자의 명시적 지시 없이 수정하지 않는다.
 | EXTERNAL | `rfcip_external` | `share` 스키마 뷰만. private_cost 접근 0 |
 
 ## 개발 순서 (Master Prompt §49)
-PHASE 1 구조/DB/권한 ✅ → 2 SITE/CONTRACT/HOLE ✅ → 3 GROUND → 4 수량산출서 → 5 작업도면
+PHASE 1 구조/DB/권한 ✅ → 2 SITE/CONTRACT/HOLE ✅ → 3 GROUND ✅ → 4 수량산출서 → 5 작업도면
 → 6 오늘작업입력 → 7 레미콘/인원/장비 → 8 비용/증빙/보안 → 9 작업일보/천공일지
 → 10 공정률/기성 → 11 SPECIAL_EVENT → 12 본사 대시보드 → 13 공유 분리 → 14 카카오톡 → 15 Pilot
 

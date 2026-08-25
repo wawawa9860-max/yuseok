@@ -263,7 +263,14 @@ interface SampleHole {
   토사: number; 풍화암: number; 연암: number; 경암: number; 총: number;
 }
 
-/** 조서에 실제로 값이 있는 지층만 등록한다. 0인 열(연암/경암)은 만들지 않는다. */
+/**
+ * 조서의 지층 열. 값이 0인 열도 지층종류로는 등록한다.
+ *
+ * 사용자 확인: "현장 여건에 따라 지반조건이 달라지는 부분들이 있어서
+ * 우선 0으로 입력해놓은 상황이다."
+ * → 0이라고 지워버리면 실제 출현 시 되살릴 근거가 사라진다.
+ *   PROVISIONAL(미확정) 상태로 남겨 두고 계획 레이어에만 넣지 않는다.
+ */
 const SAMPLE_LAYER_NAMES = ['토사', '풍화암', '연암', '경암'] as const;
 
 async function seedSampleRfcipSite(
@@ -311,18 +318,23 @@ async function seedSampleRfcipSite(
      ON CONFLICT (site_id, param_code) DO UPDATE SET param_value = EXCLUDED.param_value`,
     [siteId, headOfficeId]);
 
-  // 실제로 사용된 지층만 등록 (연암·경암은 전 공 0 이므로 만들지 않는다)
-  const usedLayers = SAMPLE_LAYER_NAMES.filter(
-    (n) => holes.some((h) => h[n] > 0));
+  // 조서의 4개 지층 열을 모두 등록한다.
+  // 계획수량이 있는 것은 CONFIRMED, 전 공 0 인 것은 PROVISIONAL(미확정).
+  const usedLayers = SAMPLE_LAYER_NAMES.filter((n) => holes.some((h) => h[n] > 0));
   const gtIds = new Map<string, string>();
-  for (let i = 0; i < usedLayers.length; i++) {
-    const name = usedLayers[i]!;
+  for (let i = 0; i < SAMPLE_LAYER_NAMES.length; i++) {
+    const name = SAMPLE_LAYER_NAMES[i]!;
+    const hasPlan = usedLayers.includes(name);
     const r = await c.query(
-      `INSERT INTO core.ground_type (site_id, code, name, sort_order, created_by)
-       VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (site_id, code) DO UPDATE SET name = EXCLUDED.name
+      `INSERT INTO core.ground_type (site_id, code, name, sort_order, status, note, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (site_id, code) DO UPDATE
+         SET name = EXCLUDED.name, status = EXCLUDED.status, note = EXCLUDED.note
        RETURNING id`,
-      [siteId, `G${String(i + 1).padStart(2, '0')}`, name, i + 1, headOfficeId]);
+      [siteId, `G${String(i + 1).padStart(2, '0')}`, name, i + 1,
+       hasPlan ? 'CONFIRMED' : 'PROVISIONAL',
+       hasPlan ? null : '수량산출서에 0으로 기재됨. 현장 여건에 따라 출현 가능.',
+       headOfficeId]);
     gtIds.set(name, r.rows[0].id);
   }
 

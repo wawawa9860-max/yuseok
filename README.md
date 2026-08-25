@@ -11,8 +11,9 @@ RF CIP(겹침 CIP) 전문건설 현장의 **천공번호 기반 통합 현장관
 |---|---|---|
 | PHASE 1 | 프로젝트 구조 / DB / 권한 | ✅ 완료 — [보고서](docs/PHASE_01_REPORT.md) |
 | PHASE 2 | SITE + CONTRACT + HOLE MASTER | ✅ 완료 — [보고서](docs/PHASE_02_REPORT.md) |
-| PHASE 3 | GROUND_TYPE + GROUND_PROFILE + 범위입력 | 대기 |
-| PHASE 4~15 | — | 대기 |
+| PHASE 3 | GROUND_TYPE + GROUND_PROFILE + 범위입력 | ✅ 완료 — [보고서](docs/PHASE_03_REPORT.md) |
+| PHASE 4 | 수량산출서 ↔ HOLE_MASTER 연결 | 대기 |
+| PHASE 5~15 | — | 대기 |
 
 ## 로컬 실행
 
