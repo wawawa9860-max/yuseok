@@ -85,7 +85,9 @@ describe('§43 자동 검증', () => {
     const token = await login('head01');
     const siteId = await siteIdByCode(token, 'TEST_SITE_01');
     await withSession({ userId: null, role: 'HEAD_OFFICE' }, async (c) => {
-      await c.query(`UPDATE core.hole_master SET design_depth_total = 21.0 WHERE hole_no='A-020'`);
+      await c.query(
+        `UPDATE core.hole_master SET design_depth_total = 21.0
+          WHERE hole_no='A-020' AND site_id=$1`, [siteId]);
     });
     const res = await request(app)
       .get(`/api/sites/${siteId}/validation`).set('Authorization', `Bearer ${token}`);
@@ -93,7 +95,9 @@ describe('§43 자동 검증', () => {
     expect(codes).toContain('DESIGN_DEPTH_MISMATCH');
     // 원복
     await withSession({ userId: null, role: 'HEAD_OFFICE' }, async (c) => {
-      await c.query(`UPDATE core.hole_master SET design_depth_total = 20.0 WHERE hole_no='A-020'`);
+      await c.query(
+        `UPDATE core.hole_master SET design_depth_total = 20.0
+          WHERE hole_no='A-020' AND site_id=$1`, [siteId]);
     });
   });
 });
@@ -104,13 +108,18 @@ describe('§13 도면 표시상태는 저장하지 않고 파생한다', () => {
     const rows = await withSession({ userId: null, role: 'HEAD_OFFICE' }, async (c) => {
       await c.query(
         `UPDATE core.hole_master SET status='COMPLETED', construction_date=CURRENT_DATE,
-                actual_depth_total=20.0 WHERE hole_no='A-011'`);
+                actual_depth_total=20.0
+          WHERE hole_no='A-011'
+            AND site_id=(SELECT id FROM core.site WHERE site_code='TEST_SITE_01')`);
       await c.query(
         `UPDATE core.hole_master SET status='COMPLETED', construction_date=CURRENT_DATE - 3,
-                actual_depth_total=20.0 WHERE hole_no='A-012'`);
+                actual_depth_total=20.0
+          WHERE hole_no='A-012'
+            AND site_id=(SELECT id FROM core.site WHERE site_code='TEST_SITE_01')`);
       const r = await c.query(
         `SELECT hole_no, display_status FROM core.v_hole_status
-          WHERE hole_no IN ('A-011','A-012','A-013') ORDER BY hole_no`);
+          WHERE site_id = (SELECT id FROM core.site WHERE site_code='TEST_SITE_01')
+            AND hole_no IN ('A-011','A-012','A-013') ORDER BY hole_no`);
       return r.rows as { hole_no: string; display_status: string }[];
     });
     expect(rows).toEqual([

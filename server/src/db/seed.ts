@@ -8,7 +8,8 @@
  *       테스트용으로 명시한 가정값이다. 실제 계약수량이 아니다.
  *       실제 운영에서는 승인된 수량산출서만이 기준이다 (§11).
  */
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
@@ -234,6 +235,8 @@ export async function seed(): Promise<void> {
         `천공 ${holeCount}공, 공당 ${spec.totalDepth}m`);
     }
 
+    await seedSampleRfcipSite(c, headOfficeId, pwHash, externalId);
+
     await c.query('COMMIT');
     console.log('[seed] done. 로그인: head01 / field01 / field02 / partner01  (비밀번호 test1234!)');
   } catch (e) {
@@ -244,8 +247,146 @@ export async function seed(): Promise<void> {
   }
 }
 
+/* ====================================================================
+ * SAMPLE_RFCIP_01 — 실제 업로드된 수량산출서(천공조서) 기반 현장
+ *
+ * 목적: 천공번호 형식이 현장마다 다르다는 사실을 실제 데이터로 검증한다.
+ *   H-PILE 구간 : '1' ~ '29'
+ *   무근        : '1.1' ~ '3.9'
+ *
+ * 값은 전부 업로드된 조서의 원본값이다. 추정하거나 만들어낸 수치가 아니다.
+ * 조서에 단가가 없으므로 계약단가는 NULL 로 둔다 (§8: AI가 계약수량을 확정하지 않는다).
+ * ==================================================================== */
+interface SampleHole {
+  type: 'HPILE' | 'MUGEUN';
+  no: string;
+  토사: number; 풍화암: number; 연암: number; 경암: number; 총: number;
+}
+
+/** 조서에 실제로 값이 있는 지층만 등록한다. 0인 열(연암/경암)은 만들지 않는다. */
+const SAMPLE_LAYER_NAMES = ['토사', '풍화암', '연암', '경암'] as const;
+
+async function seedSampleRfcipSite(
+  c: pg.Client, headOfficeId: string, pwHash: string, externalId: string,
+): Promise<void> {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const dataPath = join(HERE, '../../../db/seeds/sample_rfcip_holes.json');
+  const holes = JSON.parse(readFileSync(dataPath, 'utf8')) as SampleHole[];
+
+  const site = await c.query(
+    `INSERT INTO core.site (site_code, site_name, client_name, location, status, setup_step, created_by)
+     VALUES ('SAMPLE_RFCIP_01','샘플현장 RF-CIP (실제 수량산출서 기준)','샘플원도급(주)','미상','ACTIVE',9,$1)
+     ON CONFLICT (site_code) DO UPDATE SET site_name = EXCLUDED.site_name
+     RETURNING id`, [headOfficeId]);
+  const siteId: string = site.rows[0].id;
+
+  const fm = await c.query(
+    `INSERT INTO core.app_user (login_id, password_hash, display_name, role)
+     VALUES ('field03',$1,'이현장','FIELD_MANAGER')
+     ON CONFLICT (login_id) DO UPDATE SET password_hash = EXCLUDED.password_hash
+     RETURNING id`, [pwHash]);
+  for (const uid of [fm.rows[0].id as string, externalId]) {
+    await c.query(
+      `INSERT INTO core.user_site_access (user_id, site_id, granted_by)
+       VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [uid, siteId, headOfficeId]);
+  }
+
+  // 천공종류 — 조서의 두 블록이 곧 천공종류다
+  const ht = await c.query(
+    `INSERT INTO core.site_hole_type (site_id, code, name, sort_order)
+     VALUES ($1,'HPILE','H-PILE 구간',1), ($1,'MUGEUN','무근',2)
+     ON CONFLICT (site_id, code) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id, code`, [siteId]);
+  const holeTypeId = new Map<string, string>(
+    ht.rows.map((r: { code: string; id: string }) => [r.code, r.id]));
+
+  // 설계 파라미터 — 조서 Y~AB 블록의 원본값
+  await c.query(
+    `INSERT INTO core.site_design_param (site_id, param_code, param_name, param_value, unit, note, created_by)
+     VALUES ($1,'DIAMETER','천공 직경',0.6,'m','수량산출서 설계값',$2),
+            ($1,'CTC','C.T.C',0.47,'m','중심간거리',$2),
+            ($1,'WALL_LENGTH','가시설 연장',300,'m','벽면 연장',$2),
+            ($1,'SIDE_PILE_GAP','측면말뚝 간격',1.41,'m',NULL,$2),
+            ($1,'CONCRETE_SURCHARGE','콘크리트 할증률',2,'%','산출근거 기준',$2)
+     ON CONFLICT (site_id, param_code) DO UPDATE SET param_value = EXCLUDED.param_value`,
+    [siteId, headOfficeId]);
+
+  // 실제로 사용된 지층만 등록 (연암·경암은 전 공 0 이므로 만들지 않는다)
+  const usedLayers = SAMPLE_LAYER_NAMES.filter(
+    (n) => holes.some((h) => h[n] > 0));
+  const gtIds = new Map<string, string>();
+  for (let i = 0; i < usedLayers.length; i++) {
+    const name = usedLayers[i]!;
+    const r = await c.query(
+      `INSERT INTO core.ground_type (site_id, code, name, sort_order, created_by)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (site_id, code) DO UPDATE SET name = EXCLUDED.name
+       RETURNING id`,
+      [siteId, `G${String(i + 1).padStart(2, '0')}`, name, i + 1, headOfficeId]);
+    gtIds.set(name, r.rows[0].id);
+  }
+
+  // 공당 깊이 조합이 같은 천공번호는 하나의 지반조건을 공유한다 (§10 범위적용 효과)
+  const profileCache = new Map<string, string>();
+  for (const h of holes) {
+    const layers = usedLayers
+      .map((n) => ({ name: n, len: h[n] }))
+      .filter((l) => l.len > 0);
+    const signature = layers.map((l) => `${l.name}:${l.len.toFixed(3)}`).join('|');
+
+    let profileId = profileCache.get(signature);
+    if (!profileId) {
+      const existing = await c.query(
+        `SELECT id FROM core.ground_profile WHERE site_id=$1 AND profile_name=$2 AND revision=0`,
+        [siteId, signature]);
+      if (existing.rowCount) {
+        profileId = existing.rows[0].id as string;
+      } else {
+        const gp = await c.query(
+          `INSERT INTO core.ground_profile
+             (site_id, profile_name, revision, description, depth_mode, total_planned_depth,
+              source, source_reference, status, created_by)
+           VALUES ($1,$2,0,$3,'DEPTH_RANGE',$4,'QUANTITY_SHEET','천공조서(RF-CIP) 공당값','DRAFT',$5)
+           RETURNING id`,
+          [siteId, signature, layers.map((l) => `${l.name} ${l.len}m`).join(' + '), h.총, headOfficeId]);
+        profileId = gp.rows[0].id as string;
+        let from = 0;
+        for (let i = 0; i < layers.length; i++) {
+          const l = layers[i]!;
+          const to = Number((from + l.len).toFixed(3));
+          await c.query(
+            `INSERT INTO core.ground_profile_layer
+               (ground_profile_id, sequence, ground_type_id, from_depth, to_depth, planned_length)
+             VALUES ($1,$2,$3,$4,$5,$6)`,
+            [profileId, i + 1, gtIds.get(l.name), from, to, l.len]);
+          from = to;
+        }
+        await c.query(
+          `UPDATE core.ground_profile SET status='CONFIRMED', confirmed_by=$2, confirmed_at=now()
+            WHERE id=$1`, [profileId, headOfficeId]);
+      }
+      profileCache.set(signature, profileId);
+    }
+
+    // ON CONFLICT DO NOTHING 을 쓰지 않는다.
+    // 천공번호 충돌은 §14 에 따라 반드시 드러나야 하며, 조용히 누락되면 안 된다.
+    await c.query(
+      `INSERT INTO core.hole_master
+         (site_id, hole_no, section, hole_type_id, drawing_revision, quantity_revision,
+          design_depth_total, ground_profile_id, contract_quantity, contract_unit,
+          status, created_by)
+       VALUES ($1,$2,$3,$4,0,0,$5,$6,$5,'m','NOT_STARTED',$7)`,
+      [siteId, h.no, h.type === 'HPILE' ? 'H-PILE 구간' : '무근구간',
+       holeTypeId.get(h.type), h.총, profileId, headOfficeId]);
+  }
+
+  const total = holes.reduce((a, h) => a + h.총, 0);
+  console.log(`[seed] SAMPLE_RFCIP_01: 지층 ${usedLayers.length}종(${usedLayers.join('/')}), ` +
+    `천공 ${holes.length}공, 지반조건 ${profileCache.size}종, ` +
+    `총 계획연장 ${total.toFixed(2)}m`);
+}
+
 const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (invokedDirectly) {
   seed().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
 }
-void dirname;

@@ -2,6 +2,9 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { authRouter } from './routes/auth.js';
 import { siteRouter } from './routes/sites.js';
 import { holeRouter } from './routes/holes.js';
+import { adminSiteRouter } from './routes/admin-sites.js';
+import { adminHoleRouter } from './routes/admin-holes.js';
+import { contractRouter } from './routes/contracts.js';
 import { HttpError } from './http/errors.js';
 import { logAccessDenied } from './http/context.js';
 
@@ -15,6 +18,9 @@ export function createApp() {
   app.use('/api/auth', authRouter);
   app.use('/api/sites', siteRouter);
   app.use('/api/sites', holeRouter);
+  app.use('/api/admin/sites', adminSiteRouter);
+  app.use('/api/admin', adminHoleRouter);
+  app.use('/api', contractRouter);
 
   app.use((_req, res) => res.status(404).json({ error: 'NOT_FOUND', message: '경로를 찾을 수 없습니다.' }));
 

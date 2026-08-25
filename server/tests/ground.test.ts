@@ -43,9 +43,11 @@ describe('§7 지층종류는 현장별 사용자 정의', () => {
           GROUP BY s.site_code ORDER BY s.site_code`);
       return r.rows as { site_code: string; types: string[] }[];
     });
-    expect(rows[0]!.types).toHaveLength(2);
-    expect(rows[1]!.types).toHaveLength(3);
-    expect(rows[0]!.types).not.toEqual(rows[1]!.types);
+    const bySite = new Map(rows.map((r) => [r.site_code, r.types]));
+    expect(bySite.get('TEST_SITE_01')).toHaveLength(2);
+    expect(bySite.get('TEST_SITE_02')).toHaveLength(3);
+    // 실제 수량산출서 현장: 연암·경암 열은 전 공 0 이므로 등록되지 않는다
+    expect(bySite.get('SAMPLE_RFCIP_01')).toEqual(['토사', '풍화암']);
   });
 });
 
@@ -142,8 +144,8 @@ describe('§38 확정 데이터 보존', () => {
            VALUES ($1,'미확정 연결 테스트',0,'DEPTH_RANGE',20.0,'QUANTITY_SHEET','DRAFT') RETURNING id`,
           [site]);
         await c.query(
-          `UPDATE core.hole_master SET ground_profile_id=$1 WHERE hole_no='A-005'`,
-          [gp.rows[0].id]);
+          `UPDATE core.hole_master SET ground_profile_id=$1
+            WHERE hole_no='A-005' AND site_id=$2`, [gp.rows[0].id, site]);
       }),
     ).rejects.toThrow(/확정\(CONFIRMED\)되지 않은/);
   });
@@ -169,8 +171,8 @@ describe('§14 천공번호 무결성', () => {
           `SELECT p.id FROM core.ground_profile p
             WHERE p.site_id <> $1 AND p.status='CONFIRMED' LIMIT 1`, [site1]);
         await c.query(
-          `UPDATE core.hole_master SET ground_profile_id=$1 WHERE hole_no='A-006'`,
-          [other.rows[0].id]);
+          `UPDATE core.hole_master SET ground_profile_id=$1
+            WHERE hole_no='A-006' AND site_id=$2`, [other.rows[0].id, site1]);
       }),
     ).rejects.toThrow(/다른 현장의 지반조건/);
   });
@@ -182,7 +184,8 @@ describe('§20 지층별 계획수량 자동집계 (결정론)', () => {
       const r = await c.query(
         `SELECT ground_type_name, sum(planned_length)::text AS m
            FROM core.v_hole_layer_plan
-          WHERE hole_no BETWEEN 'A-001' AND 'A-010'
+          WHERE site_id = (SELECT id FROM core.site WHERE site_code='TEST_SITE_01')
+            AND hole_no BETWEEN 'A-001' AND 'A-010'
           GROUP BY 1 ORDER BY 1`);
       return r.rows;
     });
@@ -200,7 +203,8 @@ describe('§20 지층별 계획수량 자동집계 (결정론)', () => {
       const r = await c.query(
         `SELECT ground_type_name, sum(planned_length)::text AS m
            FROM core.v_hole_layer_plan
-          WHERE hole_no BETWEEN 'B-001' AND 'B-010'
+          WHERE site_id = (SELECT id FROM core.site WHERE site_code='TEST_SITE_02')
+            AND hole_no BETWEEN 'B-001' AND 'B-010'
           GROUP BY 1 ORDER BY 1`);
       return r.rows;
     });

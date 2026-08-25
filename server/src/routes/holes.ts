@@ -10,13 +10,14 @@ holeRouter.use(requireAuth);
 const uuid = z.string().uuid();
 
 /**
- * 현장관리자에게 노출되는 컬럼. 계약단가(contract_unit_price)는 제외한다.
- * DB 에서도 컬럼 GRANT 로 차단되어 있으므로, 여기 목록이 잘못되면 쿼리가 실패한다.
+ * 조회 컬럼. 계약단가(contract_unit_price)는 사용자 지시에 따라 현장관리자에게도 공개한다.
+ * 내부원가(private_cost)는 별개이며 여전히 차단된다 (§29).
  */
-const FIELD_COLUMNS = `
-  h.id, h.hole_no, h.hole_prefix, h.hole_index, h.section, h.hole_type_id,
+const HOLE_COLUMNS = `
+  h.id, h.hole_no, h.sort_key, h.drawing_sequence, h.drawing_ref,
+  h.section, h.hole_type_id,
   h.design_depth_total, h.actual_depth_total, h.ground_profile_id,
-  h.contract_quantity, h.contract_unit,
+  h.contract_quantity, h.contract_unit, h.contract_unit_price,
   h.planned_ready_mix_quantity, h.actual_ready_mix_quantity,
   h.status, h.construction_date, h.change_review_required,
   h.drawing_revision, h.quantity_revision`;
@@ -28,26 +29,29 @@ const listQuery = z.object({
   limit: z.coerce.number().int().min(1).max(1000).default(500),
 });
 
-/** 천공번호 목록. from/to 로 범위 선택 (§19) — 정렬은 prefix + index 결정론. */
+/**
+ * 천공번호 목록. from/to 로 범위 선택 (§19).
+ * 정렬·범위비교는 항상 자연정렬 키(sort_key)로 한다.
+ * 번호 형식이 '1', '1.1', 'A-001', 'C1-10' 무엇이든 사람이 읽는 순서대로 동작한다.
+ */
 holeRouter.get('/:siteId/holes', async (req, res, next) => {
   try {
     const siteId = uuid.parse(req.params.siteId);
     const q = listQuery.safeParse(req.query);
     if (!q.success) throw badRequest('조회 조건이 올바르지 않습니다.');
     const { from, to, status, limit } = q.data;
-    const isHeadOffice = req.actor!.role === 'HEAD_OFFICE';
 
     const rows = await withSession(req.actor!, async (c) => {
       const params: unknown[] = [siteId];
       let where = 'h.site_id = $1';
-      if (from) { params.push(from); where += ` AND (h.hole_prefix, h.hole_index) >= ((SELECT hole_prefix FROM core.hole_master WHERE site_id=$1 AND hole_no=$${params.length}), (SELECT hole_index FROM core.hole_master WHERE site_id=$1 AND hole_no=$${params.length}))`; }
-      if (to)   { params.push(to);   where += ` AND (h.hole_prefix, h.hole_index) <= ((SELECT hole_prefix FROM core.hole_master WHERE site_id=$1 AND hole_no=$${params.length}), (SELECT hole_index FROM core.hole_master WHERE site_id=$1 AND hole_no=$${params.length}))`; }
+      if (from) { params.push(from); where += ` AND h.sort_key >= core.fn_natural_sort_key($${params.length})`; }
+      if (to)   { params.push(to);   where += ` AND h.sort_key <= core.fn_natural_sort_key($${params.length})`; }
       if (status) { params.push(status); where += ` AND h.status = $${params.length}`; }
       params.push(limit);
 
-      const columns = isHeadOffice ? `${FIELD_COLUMNS}, h.contract_unit_price` : FIELD_COLUMNS;
       const r = await c.query(
-        `SELECT ${columns},
+        `SELECT ${HOLE_COLUMNS},
+                ht.name AS hole_type_name,
                 CASE
                   WHEN h.status='COMPLETED' AND h.construction_date=CURRENT_DATE THEN '금일완료'
                   WHEN h.status='COMPLETED' THEN '기존완료'
@@ -57,8 +61,9 @@ holeRouter.get('/:siteId/holes', async (req, res, next) => {
                   ELSE '미시공'
                 END AS display_status
            FROM core.hole_master h
+           LEFT JOIN core.site_hole_type ht ON ht.id = h.hole_type_id
           WHERE ${where}
-          ORDER BY h.hole_prefix, h.hole_index
+          ORDER BY h.sort_key
           LIMIT $${params.length}`, params);
       return r.rows;
     });
@@ -81,8 +86,8 @@ holeRouter.get('/:siteId/layer-summary', async (req, res, next) => {
       const params: unknown[] = [siteId];
       let where = 'v.site_id = $1';
       if (q.data.status) { params.push(q.data.status); where += ` AND v.status = $${params.length}`; }
-      if (q.data.from)   { params.push(q.data.from);   where += ` AND v.hole_no >= $${params.length}`; }
-      if (q.data.to)     { params.push(q.data.to);     where += ` AND v.hole_no <= $${params.length}`; }
+      if (q.data.from)   { params.push(q.data.from);   where += ` AND v.sort_key >= core.fn_natural_sort_key($${params.length})`; }
+      if (q.data.to)     { params.push(q.data.to);     where += ` AND v.sort_key <= core.fn_natural_sort_key($${params.length})`; }
 
       const layers = await c.query(
         `SELECT v.ground_type_code, v.ground_type_name,

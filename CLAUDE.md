@@ -25,6 +25,8 @@ Master Prompt는 사용자의 명시적 지시 없이 수정하지 않는다.
 
 ## 코드에 고정된 불변 규칙
 - **지층종류(GROUND_TYPE)를 하드코딩하지 않는다.** 현장별 사용자 정의. 마이그레이션에 '토사/풍화암/연암' 등을 넣지 않는다(시드 데이터 예외).
+- **천공번호 형식을 강제하지 않는다.** 작업도면(PDF)에 표기된 원문을 그대로 저장한다.
+  정렬·범위선택은 항상 `sort_key`(= `core.fn_natural_sort_key`) 로 한다. TS 구현과 규칙이 반드시 같아야 한다.
 - **지반조건 = 조합 + 깊이 구조.** 텍스트 한 줄로 저장 금지.
 - **지층별 길이 합계 = 총 계획심도** 를 코드로 검증한다.
 - **PRIVATE_COST는 DB 권한으로 차단한다.** 프론트 숨김만으로 구현 금지.
@@ -36,11 +38,11 @@ Master Prompt는 사용자의 명시적 지시 없이 수정하지 않는다.
 | 역할 | DB 역할 | 범위 |
 |---|---|---|
 | HEAD_OFFICE | `rfcip_head_office` | 전체 현장 + 전체 원가 + 승인 |
-| FIELD_MANAGER | `rfcip_field_manager` | 배정 현장만. 단가/원가집계 접근 불가 |
+| FIELD_MANAGER | `rfcip_field_manager` | 배정 현장만. 계약단가 조회 가능(사용자 지시). 내부원가(private_cost 단가/집계) 접근 불가 |
 | EXTERNAL | `rfcip_external` | `share` 스키마 뷰만. private_cost 접근 0 |
 
 ## 개발 순서 (Master Prompt §49)
-PHASE 1 구조/DB/권한 → 2 SITE/CONTRACT/HOLE → 3 GROUND → 4 수량산출서 → 5 작업도면
+PHASE 1 구조/DB/권한 ✅ → 2 SITE/CONTRACT/HOLE ✅ → 3 GROUND → 4 수량산출서 → 5 작업도면
 → 6 오늘작업입력 → 7 레미콘/인원/장비 → 8 비용/증빙/보안 → 9 작업일보/천공일지
 → 10 공정률/기성 → 11 SPECIAL_EVENT → 12 본사 대시보드 → 13 공유 분리 → 14 카카오톡 → 15 Pilot
 

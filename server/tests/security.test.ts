@@ -21,8 +21,11 @@ describe('§44 역할 분리', () => {
   it('본사는 전체 현장을 조회한다', async () => {
     const token = await login('head01');
     const res = await request(app).get('/api/sites').set('Authorization', `Bearer ${token}`);
-    expect(res.body.sites.map((s: { site_code: string }) => s.site_code).sort())
-      .toEqual(['TEST_SITE_01', 'TEST_SITE_02']);
+    const codes = res.body.sites.map((s: { site_code: string }) => s.site_code);
+    // 시드 현장이 모두 보여야 한다 (다른 테스트가 만든 현장이 더 있을 수 있다)
+    expect(codes).toEqual(expect.arrayContaining(
+      ['SAMPLE_RFCIP_01', 'TEST_SITE_01', 'TEST_SITE_02']));
+    expect(codes.length).toBeGreaterThanOrEqual(3);
   });
 
   it('현장관리자는 타 현장 천공번호를 조회할 수 없다 (RLS)', async () => {
@@ -139,27 +142,41 @@ describe('§29 외부 공유 경로 격리', () => {
   });
 });
 
-describe('§44 계약단가 컬럼 차단', () => {
-  it('현장관리자 역할은 hole_master.contract_unit_price 를 SELECT 할 수 없다', async () => {
-    await expect(
-      withSession({ userId: null, role: 'FIELD_MANAGER' }, async (c) => {
-        await c.query('SELECT contract_unit_price FROM core.hole_master LIMIT 1');
-      }),
-    ).rejects.toMatchObject({ code: '42501' });
+describe('계약단가 공개 (사용자 지시) — 내부원가와는 별개다', () => {
+  it('현장관리자도 hole_master.contract_unit_price 를 조회할 수 있다', async () => {
+    const rows = await withSession({ userId: null, role: 'FIELD_MANAGER' }, async (c) => {
+      const r = await c.query('SELECT contract_unit_price FROM core.hole_master LIMIT 1');
+      return r.rows;
+    });
+    expect(Array.isArray(rows)).toBe(true);
   });
 
-  it('현장관리자 API 응답에 contract_unit_price 가 포함되지 않는다', async () => {
+  it('현장관리자 API 응답에 contract_unit_price 가 포함된다', async () => {
     const head = await login('head01');
     const siteId = await siteIdByCode(head, 'TEST_SITE_01');
     const field01 = await login('field01');
     const res = await request(app)
       .get(`/api/sites/${siteId}/holes?limit=1`).set('Authorization', `Bearer ${field01}`);
     expect(res.status).toBe(200);
-    expect(res.body.holes[0]).not.toHaveProperty('contract_unit_price');
+    expect(res.body.holes[0]).toHaveProperty('contract_unit_price');
+  });
 
-    const hoRes = await request(app)
-      .get(`/api/sites/${siteId}/holes?limit=1`).set('Authorization', `Bearer ${head}`);
-    expect(hoRes.body.holes[0]).toHaveProperty('contract_unit_price');
+  it('계약단가를 열어도 내부원가(노무·장비 단가)는 여전히 차단된다 (§29)', async () => {
+    for (const table of ['private_cost.labor_rate', 'private_cost.equipment_rate']) {
+      await expect(
+        withSession({ userId: null, role: 'FIELD_MANAGER' }, async (c) => {
+          await c.query(`SELECT count(*) FROM ${table}`);
+        }),
+      ).rejects.toMatchObject({ code: '42501' });
+    }
+  });
+
+  it('계약단가를 열어도 계약상대방은 계약 테이블에 접근할 수 없다', async () => {
+    await expect(
+      withSession({ userId: null, role: 'EXTERNAL' }, async (c) => {
+        await c.query('SELECT count(*) FROM core.contract_item');
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
   });
 });
 
@@ -172,7 +189,9 @@ describe('§1-11 변경이력 보존', () => {
     const holeId = await withSession({ userId: headId, role: 'HEAD_OFFICE' }, async (c) => {
       const r = await c.query(
         `UPDATE core.hole_master SET section='변경된구간'
-          WHERE hole_no='A-002' RETURNING id`);
+          WHERE hole_no='A-002'
+            AND site_id=(SELECT id FROM core.site WHERE site_code='TEST_SITE_01')
+          RETURNING id`);
       return r.rows[0].id as string;
     });
     const log = await withSession({ userId: headId, role: 'HEAD_OFFICE' }, async (c) => {

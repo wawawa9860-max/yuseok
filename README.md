@@ -10,7 +10,7 @@ RF CIP(겹침 CIP) 전문건설 현장의 **천공번호 기반 통합 현장관
 | Phase | 내용 | 상태 |
 |---|---|---|
 | PHASE 1 | 프로젝트 구조 / DB / 권한 | ✅ 완료 — [보고서](docs/PHASE_01_REPORT.md) |
-| PHASE 2 | SITE + CONTRACT + HOLE MASTER | 대기 |
+| PHASE 2 | SITE + CONTRACT + HOLE MASTER | ✅ 완료 — [보고서](docs/PHASE_02_REPORT.md) |
 | PHASE 3 | GROUND_TYPE + GROUND_PROFILE + 범위입력 | 대기 |
 | PHASE 4~15 | — | 대기 |
 
@@ -33,7 +33,7 @@ npm --prefix server run test
 npm --prefix server run dev
 ```
 
-테스트 계정 (시드): `head01`(본사) / `field01`,`field02`(현장관리자) / `partner01`(계약상대방)
+테스트 계정 (시드): `head01`(본사) / `field01`~`field03`(현장관리자) / `partner01`(계약상대방)
 비밀번호는 모두 `test1234!` — **운영에서 사용 금지**.
 
 ## 디렉터리
@@ -43,8 +43,10 @@ db/migrations/     번호순 SQL 마이그레이션 (스키마·권한·검증�
 server/src/db/     접속풀(역할강등) / 마이그레이션 러너 / 시드
 server/src/auth/   비밀번호 해시, JWT
 server/src/http/   인증·역할 미들웨어, 오류 매핑
+server/src/domain/  결정론적 업무 로직 (천공번호 생성·자연정렬)
 server/src/routes/ REST API
 server/tests/      권한/지반조건/API 자동 테스트
 storage/           로컬 파일 저장소 (도면·사진·영수증)
-docs/              Master Prompt 및 Phase 보고서
+db/seeds/          실제 수량산출서에서 추출한 테스트 데이터
+docs/              Master Prompt, 수량산출서 분석, Phase 보고서
 ```
