@@ -36,7 +36,8 @@ siteRouter.get('/:siteId', async (req, res, next) => {
         `SELECT id, code, name, sort_order, is_active FROM core.site_hole_type
           WHERE site_id=$1 AND is_active ORDER BY sort_order`, [siteId]);
       const groundTypes = await c.query(
-        `SELECT id, code, name, sort_order, is_active FROM core.ground_type
+        `SELECT id, code, name, sort_order, is_active, status, note
+           FROM core.ground_type
           WHERE site_id=$1 AND is_active ORDER BY sort_order`, [siteId]);
       const summary = await c.query(
         `SELECT count(*)::int AS total_holes,
@@ -65,7 +66,8 @@ siteRouter.get('/:siteId/ground-types', async (req, res, next) => {
     const siteId = uuid.parse(req.params.siteId);
     const rows = await withSession(req.actor!, async (c) => {
       const r = await c.query(
-        `SELECT id, code, name, sort_order, is_active FROM core.ground_type
+        `SELECT id, code, name, sort_order, is_active, status, note
+           FROM core.ground_type
           WHERE site_id=$1 ORDER BY sort_order, code`, [siteId]);
       return r.rows;
     });
@@ -105,7 +107,7 @@ siteRouter.get('/:siteId/validation', requireRole('HEAD_OFFICE'), async (req, re
   try {
     const siteId = uuid.parse(req.params.siteId);
     const rows = await withSession(req.actor!, async (c) => {
-      const r = await c.query('SELECT * FROM core.fn_validate_site($1)', [siteId]);
+      const r = await c.query('SELECT * FROM core.fn_validate_site_full($1)', [siteId]);
       return r.rows;
     });
     res.json({

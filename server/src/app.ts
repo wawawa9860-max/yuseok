@@ -7,6 +7,7 @@ import { adminHoleRouter } from './routes/admin-holes.js';
 import { contractRouter } from './routes/contracts.js';
 import { adminGroundRouter } from './routes/admin-ground.js';
 import { groundAssignRouter } from './routes/admin-ground-assign.js';
+import { quantityImportRouter } from './routes/quantity-import.js';
 import { HttpError } from './http/errors.js';
 import { logAccessDenied } from './http/context.js';
 
@@ -24,6 +25,7 @@ export function createApp() {
   app.use('/api/admin', adminHoleRouter);
   app.use('/api/admin', adminGroundRouter);
   app.use('/api/admin', groundAssignRouter);
+  app.use('/api/admin', quantityImportRouter);
   app.use('/api', contractRouter);
 
   app.use((_req, res) => res.status(404).json({ error: 'NOT_FOUND', message: '경로를 찾을 수 없습니다.' }));
