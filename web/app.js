@@ -34,6 +34,7 @@ const state = {
   laborSame: null, laborChanges: [],
   equipSame: null, equipChanges: [],
   readyMix: null,
+  report: null,        // §33 작업일보
   cost: null,          // §27 비용 입력 중인 내용
   costTypes: [],
   recentCosts: [],
@@ -188,6 +189,7 @@ function toast(message, ms = 2600) {
 
 function logout() {
   localStorage.removeItem('rfcip.token');
+  localStorage.removeItem('rfcip.me');
   state.token = null; state.user = null;
 }
 
@@ -282,16 +284,40 @@ async function openMain() {
     <button class="later" disabled>천공현황 / 도면 · 준비중</button>
     <button id="goCost">비용 · 증빙</button>
     <button class="later" disabled>특이사항 · 준비중</button>
-    <button class="later" disabled>오늘 보고서 · 준비중</button>
+    <button id="goReport">오늘 보고서</button>
     <button class="later" disabled>카카오톡 공유 · 준비중</button>
     <div class="spacer"></div>
     <button class="ghost" id="switchSite">다른 현장 / 로그아웃</button>`;
 
-  $('#goInput').onclick = openInput;
+  $('#goInput').onclick = async () => {
+    try { await openInput(); }
+    catch (e) {
+      // 버튼을 눌렀는데 아무 일도 안 일어나는 것이 제일 나쁘다. 이유를 말해준다.
+      toast(e.offline
+        ? '통신이 안 되고 이 현장 자료를 받아둔 적도 없습니다. 통신되는 곳에서 한 번만 열어 주십시오.'
+        : e.message, 4500);
+    }
+  };
   $('#goCost').onclick = openCost;
+  // openReport(date) 라서 그대로 넘기면 클릭 이벤트가 날짜 자리에 들어간다
+  $('#goReport').onclick = () => openReport();
   $('#switchSite').onclick = () => {
     if (state.sites.length > 1) { renderSitePicker(); } else { logout(); renderLogin(); }
   };
+
+  // 통신이 될 때 입력화면 자료를 미리 받아 둔다.
+  // 현장에 들어가서 통신이 끊긴 뒤에 열어도 입력할 수 있어야 한다.
+  if (navigator.onLine && !state.stale) void warmCache();
+}
+
+/** 입력화면이 필요로 하는 자료를 미리 받아 캐시에 넣는다. 실패해도 조용히 넘어간다. */
+async function warmCache() {
+  await Promise.allSettled([
+    fetchWithCache('holes', `/sites/${state.siteId}/holes?status=NOT_STARTED&limit=1000`),
+    fetchWithCache('defaults', `/field/sites/${state.siteId}/defaults`),
+    fetchWithCache('costTypes', '/cost/cost-types'),
+    fetchWithCache('groundNoteOptions', `/field/sites/${state.siteId}/ground-note-options`),
+  ]);
 }
 
 /* ------------------------------------------- §19 오늘 천공 입력 (번호 고르기) */
@@ -663,8 +689,9 @@ function renderDepthInputs() {
 async function renderGroundOptions() {
   if (state.noteOptions.length === 0) {
     try {
-      const r = await api(`/field/sites/${state.siteId}/ground-note-options`);
-      state.noteOptions = r.options;
+      const r = await fetchWithCache(
+        'groundNoteOptions', `/field/sites/${state.siteId}/ground-note-options`);
+      state.noteOptions = r.data.options;
     } catch { state.noteOptions = [{ note_type: '기타', hint: null }]; }
   }
   const chosen = new Set(state.groundNotes.map((n) => n.note_type));
@@ -684,6 +711,199 @@ async function renderGroundOptions() {
       renderSummary();
     };
   });
+}
+
+/* ------------------------------------------- §33 작업일보 (PHASE 9) */
+/*
+ * 현장관리자가 따로 쓰는 것이 없다. 이미 받아 둔 값을 모아 보여줄 뿐이다 (§1-7).
+ * 유일하게 손댈 수 있는 것이 익일계획인데, 그것도 내일 화면의 기본값이 되므로
+ * 결국 내일 입력을 줄여 준다 (§1-5).
+ *
+ * 금액은 없다. 서버가 애초에 내려주지 않는다 (§29).
+ */
+async function openReport(date) {
+  const d = date ?? state.today.date;
+  let r;
+  try {
+    const got = await fetchWithCache(`report.${d}`, `/reports/sites/${state.siteId}/daily-report?date=${d}`);
+    r = got.data; state.stale = got.stale;
+  } catch (e) { toast(e.message); return; }
+  state.report = r;
+  renderReport();
+}
+
+function renderReport() {
+  const r = state.report;
+  const row = (label, value) => value == null || value === ''
+    ? '' : `<tr><td>${label}</td><td class="num">${value}</td></tr>`;
+
+  app.innerHTML = `
+    <header class="site">
+      <h1>작업일보</h1>
+      <div class="date">${dateLabel(r.work_date)} · ${r.site.site_name}</div>
+    </header>
+
+    ${state.stale ? '<div class="notice warn">통신이 안 되어 마지막으로 받은 내용을 보여줍니다.</div>' : ''}
+    ${r.status === 'NONE' ? '<div class="notice warn">이 날은 입력된 작업이 없습니다.</div>' : ''}
+
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><div class="label">금일 천공</div>
+          <div class="value">${r.today.hole_count}<span class="unit">공</span></div></div>
+        <div class="stat"><div class="label">금일 연장</div>
+          <div class="value">${num(r.today.length)}<span class="unit">m</span></div></div>
+        <div class="stat"><div class="label">금일 공수</div>
+          <div class="value">${num(r.today_man_days)}<span class="unit">일</span></div></div>
+      </div>
+      <table class="summary">
+        ${row('작업구간', r.sections)}
+        ${row('작업내용', r.work_summary)}
+        ${row('누계 천공', `${r.cumulative.hole_count} / ${r.cumulative.total_hole_count}공`)}
+        ${row('누계 공수', `${num(r.cumulative_man_days)}일`)}
+      </table>
+    </div>
+
+    ${r.hole_numbers.length ? `
+    <div class="card">
+      <h2>금일 천공번호</h2>
+      <div class="picker" style="max-height:none">
+        ${r.hole_numbers.map((h) => `<button class="${h.depth_same_as_plan ? '' : 'in-range'}"
+          data-hole="${h.hole_no}">${h.hole_no}${h.depth_same_as_plan ? ''
+            : `<br><small>${num(h.actual_depth_total)}m</small>`}</button>`).join('')}
+      </div>
+      <p class="muted" style="font-size:17px">번호를 누르면 천공일지가 나옵니다.</p>
+    </div>` : ''}
+
+    ${r.layer_summary.length ? `
+    <div class="card">
+      <h2>지층별 계획 천공연장</h2>
+      <table class="summary">
+        ${r.layer_summary.map((l) =>
+          `<tr><td>${l.ground_type_name}</td><td class="num">${num(l.planned_length)} m</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    ${r.ready_mix ? `
+    <div class="card">
+      <h2>레미콘</h2>
+      <table class="summary">
+        ${row('반입량', `${num(r.ready_mix.quantity_m3)} m³`)}
+        ${r.ready_mix.has_delay
+          ? row('공급지연', `${r.ready_mix.delay_minutes}분 · ${r.ready_mix.delay_reason ?? ''}`)
+          : ''}
+      </table>
+    </div>` : ''}
+
+    ${r.labor.length ? `
+    <div class="card">
+      <h2>인원 (출력일보)</h2>
+      <table class="summary">
+        ${r.labor.map((l) => `<tr><td>${l.role_name}${l.absence_reason
+            ? `<br><small class="muted">${l.absence_reason}</small>` : ''}</td>
+          <td class="num">${num(l.headcount)}명 × ${num(l.work_days)}일 = ${num(l.man_days)}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    ${r.equipment.length ? `
+    <div class="card">
+      <h2>장비 (가동일보)</h2>
+      <table class="summary">
+        ${r.equipment.map((e) => `<tr><td>${e.equipment_name}${e.idle_reason
+            ? `<br><small class="muted">${e.idle_reason}</small>` : ''}</td>
+          <td class="num">${Number(e.operating_days) === 0 ? '미가동'
+            : `${num(e.unit_days)}일`}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    ${r.special_notes.length ? `
+    <div class="card">
+      <h2>특이사항</h2>
+      <table class="summary">
+        ${r.special_notes.map((n) => `<tr><td>${n.note_type}${n.memo
+            ? `<br><small class="muted">${n.memo}</small>` : ''}</td>
+          <td class="num">${n.hole_numbers.join(', ')}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    <div class="card">
+      <h2>익일계획</h2>
+      <label class="field"><span class="label">비워두면 다음 미시공 번호를 씁니다</span>
+        <textarea id="nextPlan" rows="2">${r.next_day_plan ?? ''}</textarea></label>
+      ${!r.next_day_plan && r.next_day_suggestion.length ? `
+        <button class="ghost" id="useSuggestion">${r.next_day_suggestion[0]} ~ ${r.next_day_suggestion[r.next_day_suggestion.length - 1]} 로 적기</button>` : ''}
+      ${r.status !== 'NONE' ? '<button class="primary" id="savePlan">익일계획 저장</button>' : ''}
+    </div>
+
+    <button class="ghost" id="back">돌아가기</button>`;
+
+  app.querySelectorAll('button[data-hole]').forEach((b) => {
+    b.onclick = () => openHoleLog(b.dataset.hole);
+  });
+  $('#useSuggestion') && ($('#useSuggestion').onclick = () => {
+    const s = r.next_day_suggestion;
+    $('#nextPlan').value = `${s[0]} ~ ${s[s.length - 1]} 천공`;
+  });
+  $('#savePlan') && ($('#savePlan').onclick = async () => {
+    try {
+      await api(`/reports/sites/${state.siteId}/daily-report/next-day-plan`, {
+        method: 'PUT',
+        body: JSON.stringify({ work_date: r.work_date, next_day_plan: $('#nextPlan').value.trim() }),
+      });
+      toast('익일계획을 저장했습니다.');
+      await openReport(r.work_date);
+    } catch (e) { toast(e.message); }
+  });
+  $('#back').onclick = openMain;
+}
+
+/** §34 천공일지 */
+async function openHoleLog(holeNo) {
+  let h;
+  try {
+    h = await api(`/reports/sites/${state.siteId}/holes/${encodeURIComponent(holeNo)}/log`);
+  } catch (e) { toast(e.message); return; }
+
+  const row = (label, value) => value == null || value === ''
+    ? '' : `<tr><td>${label}</td><td class="num">${value}</td></tr>`;
+  app.innerHTML = `
+    <header class="site"><h1>천공일지</h1><div class="date">${h.hole_no}</div></header>
+    <div class="card">
+      <table class="summary">
+        ${row('구간', h.section)}
+        ${row('종류', h.hole_type)}
+        ${row('계획심도', h.design_depth_total ? `${num(h.design_depth_total)} m` : null)}
+        ${row('실제심도', h.actual_depth_total ? `${num(h.actual_depth_total)} m` : '미시공')}
+        ${h.depth_diff && Number(h.depth_diff) !== 0
+          ? row('계획 대비', `${Number(h.depth_diff) > 0 ? '+' : ''}${num(h.depth_diff)} m`) : ''}
+        ${row('시공일', h.construction_date ? dateLabel(h.construction_date) : null)}
+        ${row('도면', h.drawing.drawing_ref)}
+      </table>
+    </div>
+
+    ${h.planned_layers.length ? `
+    <div class="card">
+      <h2>계획 지층</h2>
+      <table class="summary">
+        ${h.planned_layers.map((l) =>
+          `<tr><td>${l.ground_type_name}</td><td class="num">${num(l.planned_length)} m</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    ${h.ready_mix ? `
+    <div class="card"><h2>레미콘</h2>
+      <table class="summary">${row('반입량', `${num(h.ready_mix.quantity_m3)} m³`)}</table>
+    </div>` : ''}
+
+    ${h.special_notes.length ? `
+    <div class="card"><h2>특이사항</h2>
+      <table class="summary">
+        ${h.special_notes.map((n) => `<tr><td>${n.note_type}</td>
+          <td class="num">${n.memo ?? ''}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    <button class="ghost" id="backReport">작업일보로</button>`;
+  $('#backReport').onclick = () => renderReport();
 }
 
 /* ------------------------------------------------ §27 비용 · 증빙 (PHASE 8) */
@@ -924,8 +1144,24 @@ async function submitDaily() {
 /* ------------------------------------------------------------------ 시작 */
 async function boot() {
   if (!state.token) return renderLogin();
+
+  // 통신이 끊긴 곳에서 앱을 새로 열어도 쓸 수 있어야 한다.
+  // 마지막으로 확인된 내 정보를 남겨 두고, 통신이 안 되면 그것으로 연다.
+  let me;
   try {
-    const me = await api('/auth/me');
+    me = await api('/auth/me');
+    try { localStorage.setItem('rfcip.me', JSON.stringify(me)); } catch { /* 저장공간 없음 */ }
+  } catch (e) {
+    if (!e.offline) return renderLogin(e.message);
+    const saved = localStorage.getItem('rfcip.me');
+    if (!saved) {
+      return renderLogin('통신이 되지 않습니다. 통신되는 곳에서 한 번만 로그인해 주십시오.');
+    }
+    me = JSON.parse(saved);
+    state.stale = true;
+  }
+
+  try {
     state.user = me.user; state.sites = me.sites;
     if (state.sites.length === 0) return renderLogin('배정된 현장이 없습니다.');
     if (!state.siteId || !state.sites.some((s) => s.id === state.siteId)) {

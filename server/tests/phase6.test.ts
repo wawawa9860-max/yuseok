@@ -444,3 +444,56 @@ describe('§19 화면에서 범위를 고르는 규칙 (회귀)', () => {
     expect(isInRange(pick, list, 'A-011')).toBe(false);
   });
 });
+
+/* ================================ 회귀: [아니오] 인데 일부만 적는 경우 */
+describe('§16 심도 예외는 적은 공만 예외다 (회귀)', () => {
+  it('★ [아니오] 를 누르고 한 공만 적어도 저장된다', async () => {
+    // 화면 문구: "다른 공만 적으십시오. 비워두면 계획심도를 씁니다."
+    // 예전에는 안 적은 공까지 '다름' 으로 저장하려다 400 으로 깨졌다.
+    const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-10-21', from: 'A-070', to: 'A-074',
+        depth_same_as_plan: false,
+        depth_exceptions: [{ hole_no: 'A-072', actual_depth_total: '23.4' }],
+        submit: true,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.today_hole_count).toBe(5);
+
+    const rows = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT h.hole_no, d.depth_same_as_plan, d.actual_depth_total::text AS actual
+           FROM core.daily_work_hole d
+           JOIN core.hole_master h ON h.id = d.hole_id
+           JOIN core.daily_work w ON w.id = d.daily_work_id
+          WHERE w.site_id=$1 AND w.work_date='2026-10-21'
+          ORDER BY h.sort_key`, [siteId]);
+      return r.rows;
+    });
+    const byNo = new Map(rows.map((r: { hole_no: string }) => [r.hole_no, r]));
+    // 적은 공만 예외
+    expect(byNo.get('A-072')).toMatchObject({ depth_same_as_plan: false, actual: '23.400' });
+    // 나머지는 계획심도 그대로
+    for (const no of ['A-070', 'A-071', 'A-073', 'A-074']) {
+      expect(byNo.get(no)).toMatchObject({ depth_same_as_plan: true, actual: null });
+    }
+  });
+
+  it('예외를 하나도 안 적으면 전부 계획심도다', async () => {
+    const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-10-22', from: 'A-080', to: 'A-081',
+        depth_same_as_plan: false, submit: true,
+      });
+    expect(res.status).toBe(201);
+    const n = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT count(*)::int AS n FROM core.daily_work_hole d
+           JOIN core.daily_work w ON w.id = d.daily_work_id
+          WHERE w.site_id=$1 AND w.work_date='2026-10-22' AND NOT d.depth_same_as_plan`,
+        [siteId]);
+      return r.rows[0].n as number;
+    });
+    expect(n).toBe(0);
+  });
+});

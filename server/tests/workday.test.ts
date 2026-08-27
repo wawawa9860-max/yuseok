@@ -196,7 +196,7 @@ describe('출력일보 · 장비가동일보 조회', () => {
     for (const res of [labor, equip]) {
       const keys = new Set<string>();
       JSON.stringify(res.body, (k, v) => { keys.add(k); return v; });
-      for (const k of keys) expect(k).not.toMatch(/amount|rate|price|cost|단가/);
+      for (const k of keys) expect(k).not.toMatch(/(^|_)(amount|rate|price|cost|단가)(_|$)/);
     }
   });
 

@@ -318,7 +318,11 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
 
       for (const h of fresh) {
         const actual = exceptions.get(h.hole_no);
-        const same = actual === undefined ? d.depth_same_as_plan : false;
+        // 화면 문구 그대로다: "다른 공만 적으십시오. 비워두면 계획심도를 씁니다."
+        // 날짜 단위 [아니오] 는 입력칸을 여는 스위치일 뿐, 모든 공이 다르다는 뜻이 아니다.
+        // 여기서 d.depth_same_as_plan 을 그대로 쓰면 안 적은 공이 '다름 + 실제심도 없음' 이
+        // 되어 저장이 통째로 깨진다.
+        const same = actual === undefined;
         await c.query(
           `INSERT INTO core.daily_work_hole
              (daily_work_id, hole_id, depth_same_as_plan, actual_depth_total)
