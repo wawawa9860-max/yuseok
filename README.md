@@ -13,8 +13,9 @@ RF CIP(겹침 CIP) 전문건설 현장의 **천공번호 기반 통합 현장관
 | PHASE 2 | SITE + CONTRACT + HOLE MASTER | ✅ 완료 — [보고서](docs/PHASE_02_REPORT.md) |
 | PHASE 3 | GROUND_TYPE + GROUND_PROFILE + 범위입력 | ✅ 완료 — [보고서](docs/PHASE_03_REPORT.md) |
 | PHASE 4 | 수량산출서 ↔ HOLE_MASTER 연결 | ✅ 완료 — [보고서](docs/PHASE_04_REPORT.md) |
-| PHASE 5 | 작업도면 ↔ 천공번호 연결 | 대기 (작업도면 PDF 필요) |
-| PHASE 6~15 | — | 대기 |
+| PHASE 5 | 작업도면 ↔ 천공번호 연결 | ✅ 완료 — [보고서](docs/PHASE_05_REPORT.md) |
+| PHASE 6 | 모바일 오늘 작업입력 | 대기 |
+| PHASE 7~15 | — | 대기 |
 
 ## 로컬 실행
 
@@ -52,5 +53,5 @@ server/src/routes/ REST API
 server/tests/      권한/지반조건/API 자동 테스트
 storage/           로컬 파일 저장소 (도면·사진·영수증)
 db/seeds/          실제 수량산출서에서 추출한 테스트 데이터
-docs/              Master Prompt, 수량산출서 분석, Phase 보고서
+docs/              Master Prompt, 문서 분석·검토, Phase 보고서
 ```

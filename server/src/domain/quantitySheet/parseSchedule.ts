@@ -199,6 +199,13 @@ export function parseScheduleSheet(ws: ExcelJS.Worksheet): ScheduleBlock[] {
       total: round3(readCell(ws, totalRow, l.subtotal_col ?? l.per_hole_col).number ?? 0),
     }));
 
+    // 합계행의 '합계' 열과 번호칸은 지층 소계와 별개의 수식을 쓰는 경우가 많다.
+    // 수식 범위가 낡으면 여기만 틀리므로 반드시 따로 대조한다.
+    const sheetGrandTotal = (totalRow !== null && totalCol !== null)
+      ? readCell(ws, totalRow, totalCol).number : null;
+    const sheetHoleCount = totalRow !== null
+      ? readCell(ws, totalRow, h.col).number : null;
+
     blocks.push({
       block_key: ws.getColumn(h.col).letter,
       block_label: blockLabel,
@@ -216,6 +223,8 @@ export function parseScheduleSheet(ws: ExcelJS.Worksheet): ScheduleBlock[] {
       computed_grand_total: round3(rows.reduce((a, r) => a + r.layer_sum, 0)),
       sheet_totals: sheetTotals,
       sheet_total_row: totalRow,
+      sheet_grand_total: sheetGrandTotal === null ? null : round3(sheetGrandTotal),
+      sheet_hole_count: sheetHoleCount,
     });
   }
 

@@ -85,16 +85,39 @@ export async function analyzeWorkbook(filePath: string): Promise<WorkbookAnalysi
 
   // 조서 내부 정합성: 계산 합계 vs 조서 합계행
   for (const b of blocks) {
-    if (!b.sheet_totals) continue;
-    for (const st of b.sheet_totals) {
-      const computed = b.computed_totals.find((c) => c.label === st.label);
-      if (computed && Math.abs(computed.total - st.total) > 0.011) {
-        warnings.push({
-          code: 'BLOCK_TOTAL_MISMATCH', severity: 'ERROR',
-          message: `[${b.block_label ?? b.block_key}] ${st.label}: `
-            + `행 합계 ${computed.total}m 가 조서 합계행 ${st.total}m 와 다릅니다.`,
-        });
+    const who = b.block_label ?? b.block_key;
+
+    if (b.sheet_totals) {
+      for (const st of b.sheet_totals) {
+        const computed = b.computed_totals.find((c) => c.label === st.label);
+        if (computed && Math.abs(computed.total - st.total) > 0.011) {
+          warnings.push({
+            code: 'BLOCK_TOTAL_MISMATCH', severity: 'ERROR',
+            message: `[${who}] ${st.label}: 행 합계 ${computed.total}m 가 `
+              + `조서 합계행 ${st.total}m 와 다릅니다.`,
+          });
+        }
       }
+    }
+
+    // 합계열은 지층 소계와 다른 수식을 쓴다. 여기만 낡은 범위를 참조하는 사고가 실제로 있었다.
+    if (b.sheet_grand_total !== null
+        && Math.abs(b.computed_grand_total - b.sheet_grand_total) > 0.011) {
+      warnings.push({
+        code: 'GRAND_TOTAL_MISMATCH', severity: 'ERROR',
+        message: `[${who}] 합계열: 행을 더한 값 ${b.computed_grand_total}m 가 `
+          + `조서 합계행의 합계 ${b.sheet_grand_total}m 와 다릅니다. `
+          + '합계 수식의 참조범위가 데이터 행 수와 맞는지 확인하십시오.',
+      });
+    }
+
+    // 합계행 번호칸에 적힌 공수도 실제 행 수와 대조한다.
+    if (b.sheet_hole_count !== null && b.sheet_hole_count !== b.rows.length) {
+      warnings.push({
+        code: 'HOLE_COUNT_MISMATCH', severity: 'ERROR',
+        message: `[${who}] 공수: 실제 ${b.rows.length}공 인데 `
+          + `조서 합계행에는 ${b.sheet_hole_count}공 으로 적혀 있습니다.`,
+      });
     }
   }
 

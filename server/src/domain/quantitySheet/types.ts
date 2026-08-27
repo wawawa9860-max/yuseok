@@ -37,6 +37,10 @@ export interface ScheduleBlock {
   /** 조서 합계행에서 읽은 값 (있으면) */
   sheet_totals: { label: string; total: number }[] | null;
   sheet_total_row: number | null;
+  /** 조서 합계행의 '합계' 열 값. 지층 소계와 따로 관리되므로 별도로 대조한다. */
+  sheet_grand_total: number | null;
+  /** 조서 합계행의 번호칸에 적힌 공수 (있으면) */
+  sheet_hole_count: number | null;
 }
 
 export interface BasisTotal {
