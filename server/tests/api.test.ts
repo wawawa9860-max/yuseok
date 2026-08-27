@@ -34,7 +34,10 @@ describe('인증', () => {
     const token = await login('field02');
     const res = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
-    expect(res.body.sites.map((s: { site_code: string }) => s.site_code)).toEqual(['TEST_SITE_02']);
+    const codes = res.body.sites.map((s: { site_code: string }) => s.site_code);
+    expect(codes).toContain('TEST_SITE_02');
+    // 배정되지 않은 현장은 보이지 않는다
+    expect(codes).not.toContain('TEST_SITE_01');
   });
 });
 

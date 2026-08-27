@@ -15,8 +15,9 @@ RF CIP(겹침 CIP) 전문건설 현장의 **천공번호 기반 통합 현장관
 | PHASE 4 | 수량산출서 ↔ HOLE_MASTER 연결 | ✅ 완료 — [보고서](docs/PHASE_04_REPORT.md) |
 | PHASE 5 | 작업도면 ↔ 천공번호 연결 | ✅ 완료 — [보고서](docs/PHASE_05_REPORT.md) |
 | PHASE 6 | 모바일 오늘 작업입력 | ✅ 완료 — [보고서](docs/PHASE_06_REPORT.md) |
-| PHASE 7 | 레미콘 / 인원 / 장비 | 대기 |
-| PHASE 8~15 | — | 대기 |
+| PHASE 7 | 레미콘 / 인원 / 장비 + 오프라인 큐 | ✅ 완료 — [보고서](docs/PHASE_07_REPORT.md) |
+| PHASE 8 | 비용 + 사진증빙 + 본사전용 보안 | 대기 |
+| PHASE 9~15 | — | 대기 |
 
 ## 로컬 실행
 

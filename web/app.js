@@ -8,11 +8,13 @@
  */
 
 import { isInRange, nextPick } from './pick.js';
+import { enqueue, flush, newRequestId, pendingCount } from './queue.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const app = $('#app');
 
 const state = {
+  pending: 0,
   token: localStorage.getItem('rfcip.token') || null,
   user: null,
   sites: [],
@@ -26,25 +28,102 @@ const state = {
   depthExceptions: {},
   groundNotes: [],
   noteOptions: [],
+  stale: false,
+  previewOffline: false,
+  defaults: { labor: [], equipment: [] },
+  laborSame: null, laborChanges: [],
+  equipSame: null, equipChanges: [],
+  readyMix: null,
 };
 
 /* ------------------------------------------------------------------ 통신 */
 async function api(path, options = {}) {
-  const res = await fetch(`/api${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } catch (e) {
+    // 통신 자체가 안 된 경우. 재전송하면 되는 상황이다.
+    const err = new Error('통신이 되지 않습니다.');
+    err.offline = true;
+    throw err;
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 401) { logout(); throw new Error('다시 로그인해 주십시오.'); }
-    throw new Error(body.message || '오류가 발생했습니다.');
+    if (res.status >= 500) {
+      const err = new Error(body.message || '서버 오류입니다.');
+      err.offline = true;     // 서버 일시 장애도 재전송 대상
+      throw err;
+    }
+    const err = new Error(body.message || '오류가 발생했습니다.');
+    err.permanent = true;     // 검증 실패 등은 다시 보내도 소용없다
+    throw err;
   }
   return body;
 }
+
+/* ------------------------------------------------- 오프라인 대비 캐시 */
+/**
+ * 큐만으로는 부족하다. 통신이 끊긴 채로 앱을 열면
+ * 천공번호 목록조차 못 받아 입력 화면에 들어갈 수 없다.
+ * 마지막으로 성공한 조회 결과를 기기에 남겨 두고, 통신이 안 되면 그것으로 화면을 연다.
+ */
+const cacheKey = (name) => `rfcip.cache.${name}.${state.siteId}`;
+
+function cacheSave(name, data) {
+  try {
+    localStorage.setItem(cacheKey(name), JSON.stringify({ at: Date.now(), data }));
+  } catch { /* 저장공간이 없으면 캐시 없이 동작한다 */ }
+}
+
+function cacheLoad(name) {
+  try {
+    const raw = localStorage.getItem(cacheKey(name));
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+/** 통신이 되면 서버에서, 안 되면 마지막 캐시에서 가져온다. */
+async function fetchWithCache(name, path) {
+  try {
+    const data = await api(path);
+    cacheSave(name, data);
+    return { data, stale: false };
+  } catch (e) {
+    const hit = cacheLoad(name);
+    if (e.offline && hit) return { data: hit.data, stale: true, at: hit.at };
+    throw e;
+  }
+}
+
+/* -------------------------------------------------------- 오프라인 큐 */
+/** 큐에 쌓인 항목을 서버로 보낸다. */
+async function sendQueued(item) {
+  return api(item.path, {
+    method: 'POST',
+    headers: { 'X-Client-Request-Id': item.request_id },
+    body: JSON.stringify(item.payload),
+  });
+}
+
+async function flushQueue({ silent = true } = {}) {
+  if (!navigator.onLine) return;
+  const before = await pendingCount();
+  if (before === 0) return;
+  const r = await flush(sendQueued);
+  state.pending = await pendingCount();
+  if (r.sent > 0 && !silent) toast(`저장 대기 ${r.sent}건을 보냈습니다.`);
+  if (r.sent > 0) await openMain();
+}
+
+window.addEventListener('online', () => flushQueue({ silent: false }));
 
 function toast(message, ms = 2600) {
   const el = document.createElement('div');
@@ -111,8 +190,9 @@ function renderSitePicker() {
 
 /* ------------------------------------------------------------------ §18 메인 */
 async function openMain() {
-  const t = await api(`/field/sites/${state.siteId}/today`);
+  const { data: t, stale } = await fetchWithCache('today', `/field/sites/${state.siteId}/today`);
   state.today = t;
+  state.stale = stale;
   const p = t.progress;
   const submitted = t.daily_work && t.daily_work.status === 'SUBMITTED';
 
@@ -132,6 +212,8 @@ async function openMain() {
           <div class="value">${num(p.progress_rate)}<span class="unit">%</span></div></div>
       </div>
       ${submitted ? `<div class="notice ok">오늘 입력을 마쳤습니다. (${t.today_holes.length}공)</div>` : ''}
+      ${state.pending > 0 ? `<div class="notice warn">저장 대기 ${state.pending}건 · 통신되면 자동으로 보냅니다.</div>` : ''}
+      ${state.stale ? '<div class="notice warn">통신이 안 되어 마지막으로 받은 내용을 보여줍니다. 입력은 가능합니다.</div>' : ''}
     </div>
 
     ${t.today_layer_summary.length ? `
@@ -161,8 +243,17 @@ async function openMain() {
 /* ------------------------------------------- §19 오늘 천공 입력 (번호 고르기) */
 async function openInput() {
   // 천공번호 목록은 공용 조회 API 를 쓴다 (/api/sites/:id/holes)
-  const list = await api(`/sites/${state.siteId}/holes?status=NOT_STARTED&limit=1000`);
-  state.notStarted = list.holes;
+  const [list, defaults] = await Promise.all([
+    fetchWithCache('holes', `/sites/${state.siteId}/holes?status=NOT_STARTED&limit=1000`),
+    fetchWithCache('defaults', `/field/sites/${state.siteId}/defaults`)
+      .catch(() => ({ data: { labor: [], equipment: [] }, stale: false })),
+  ]);
+  state.notStarted = list.data.holes;
+  state.defaults = defaults.data;
+  state.stale = list.stale;
+  state.laborSame = null; state.laborChanges = [];
+  state.equipSame = null; state.equipChanges = [];
+  state.readyMix = null;
   state.pick = { from: state.today.suggested_start_hole_no, to: null };
   state.preview = null;
   state.depthSame = null; state.groundSame = null;
@@ -227,8 +318,37 @@ async function loadPreview() {
       method: 'POST',
       body: JSON.stringify({ work_date: state.today.date, from, to }),
     });
-    renderInput();
-  } catch (e) { toast(e.message); }
+    state.previewOffline = false;
+  } catch (e) {
+    if (!e.offline) { toast(e.message); return; }
+    // 통신이 안 되면 기기에서 계산해 보여준다.
+    // 서버가 다시 계산하므로 이 값은 화면 표시용이다.
+    state.preview = localPreview(from, to);
+    state.previewOffline = true;
+  }
+  renderInput();
+}
+
+/** 오프라인 미리보기 — 서버와 같은 규칙으로 기기에서 계산한다 (§46). */
+function localPreview(from, to) {
+  const nos = state.notStarted.map((h) => h.hole_no);
+  const a = nos.indexOf(from); const b = nos.indexOf(to);
+  const picked = state.notStarted.slice(Math.min(a, b), Math.max(a, b) + 1);
+  const length = picked.reduce((sum, h) => sum + Number(h.design_depth_total ?? 0), 0);
+  return {
+    today_hole_count: picked.length,
+    today_hole_numbers: picked.map((h) => h.hole_no),
+    today_planned_length: Number(length.toFixed(3)),
+    layer_summary: [],
+    cumulative_hole_count: (state.today.progress?.completed_holes ?? 0) + picked.length,
+    remaining_hole_count: (state.today.progress?.remaining_holes ?? 0) - picked.length,
+    progress_rate_after: null,
+    issues: [{
+      code: 'OFFLINE_PREVIEW', severity: 'WARN',
+      message: '통신이 안 되어 기기에서 계산했습니다. 지층별 수량은 저장 후 서버가 확정합니다.',
+    }],
+    can_save: picked.length > 0,
+  };
 }
 
 /* -------------------------------- §20 자동집계 + §16 실제심도 + §15 특이사항 */
@@ -245,7 +365,8 @@ function renderSummary() {
           `<tr><td>${l.ground_type_name}</td><td class="num">${num(l.planned_length)} m</td></tr>`).join('')}
         <tr><td class="muted">누계</td><td class="num">${s.cumulative_hole_count}공</td></tr>
         <tr><td class="muted">잔여</td><td class="num">${s.remaining_hole_count}공</td></tr>
-        <tr><td class="muted">공정률</td><td class="num">${num(s.progress_rate_after)} %</td></tr>
+        ${s.progress_rate_after === null ? ''
+          : `<tr><td class="muted">공정률</td><td class="num">${num(s.progress_rate_after)} %</td></tr>`}
       </table>
       ${s.issues.map((i) => `<div class="notice ${i.severity === 'ERROR' ? 'error' : 'warn'}">${i.message}</div>`).join('')}
     </div>
@@ -268,6 +389,38 @@ function renderSummary() {
       <div id="groundDetail"></div>
     </div>
 
+    <div class="card">
+      <div class="question">금일 레미콘 반입량</div>
+      <div class="rowlist">
+        <div class="row">
+          <input id="rmQty" inputmode="decimal" placeholder="m³ (없으면 비워두십시오)"
+                 value="${state.readyMix?.quantity_m3 ?? ''}">
+        </div>
+      </div>
+      <div class="question" style="margin-top:16px">공급지연이 있었습니까?</div>
+      <div class="choice">
+        <button id="rmNoDelay" aria-pressed="${state.readyMix?.has_delay === false}">없음</button>
+        <button id="rmDelay"   aria-pressed="${state.readyMix?.has_delay === true}">있음</button>
+      </div>
+      <div id="rmDelayDetail"></div>
+    </div>
+
+    <div class="card">
+      <div class="question">오늘 인원은 기본설정과 동일합니까?</div>
+      <div class="choice">
+        <button id="laborYes" aria-pressed="${state.laborSame !== false}">예</button>
+        <button id="laborNo"  aria-pressed="${state.laborSame === false}">아니오</button>
+      </div>
+      <div id="laborDetail"></div>
+
+      <div class="question" style="margin-top:16px">오늘 장비는 기본설정과 동일합니까?</div>
+      <div class="choice">
+        <button id="equipYes" aria-pressed="${state.equipSame !== false}">예</button>
+        <button id="equipNo"  aria-pressed="${state.equipSame === false}">아니오</button>
+      </div>
+      <div id="equipDetail"></div>
+    </div>
+
     <button class="primary" id="submit"
       ${(!s.can_save || state.depthSame === null || state.groundSame === null) ? 'disabled' : ''}>
       입력완료${exCount ? ` (심도 예외 ${exCount}공)` : ''}
@@ -279,8 +432,94 @@ function renderSummary() {
   $('#groundYes').onclick = () => { state.groundSame = false; renderGroundOptions(); };
   $('#submit').onclick = submitDaily;
 
+  // 레미콘 (§23)
+  $('#rmQty').onchange = (ev) => {
+    const v = ev.target.value.trim();
+    if (v === '') { state.readyMix = null; return; }
+    state.readyMix = { ...(state.readyMix ?? { has_delay: false }), quantity_m3: v };
+  };
+  $('#rmNoDelay').onclick = () => {
+    state.readyMix = { ...(state.readyMix ?? { quantity_m3: '0' }), has_delay: false };
+    delete state.readyMix.delay_minutes; delete state.readyMix.delay_reason;
+    renderSummary();
+  };
+  $('#rmDelay').onclick = () => {
+    state.readyMix = { ...(state.readyMix ?? { quantity_m3: '0' }), has_delay: true };
+    renderSummary();
+  };
+
+  // 인원·장비 (§21, §22) — 기본은 '동일'. 바꿀 때만 누른다.
+  $('#laborYes').onclick = () => { state.laborSame = true; state.laborChanges = []; renderSummary(); };
+  $('#laborNo').onclick  = () => { state.laborSame = false; renderSummary(); };
+  $('#equipYes').onclick = () => { state.equipSame = true; state.equipChanges = []; renderSummary(); };
+  $('#equipNo').onclick  = () => { state.equipSame = false; renderSummary(); };
+
   if (state.depthSame === false) renderDepthInputs();
   if (state.groundSame === false) renderGroundOptions();
+  if (state.readyMix?.has_delay) renderDelayOptions();
+  if (state.laborSame === false) renderDefaultEditor('labor');
+  if (state.equipSame === false) renderDefaultEditor('equip');
+}
+
+/** §23 공급지연 — '있음' 일 때만 나온다 */
+function renderDelayOptions() {
+  const box = $('#rmDelayDetail');
+  if (!box) return;
+  const mins = [30, 60, 90, 120];
+  const reasons = ['레미콘공장', '원도급', '검측', '현장조건', '기타'];
+  box.innerHTML = `
+    <p class="muted" style="font-size:17px;margin-top:12px">지연시간</p>
+    <div class="picker" style="max-height:none">
+      ${mins.map((m) => `<button data-min="${m}"
+        aria-pressed="${state.readyMix?.delay_minutes === m}">${m}분</button>`).join('')}
+    </div>
+    <p class="muted" style="font-size:17px;margin-top:12px">사유</p>
+    <div class="picker" style="max-height:none">
+      ${reasons.map((r) => `<button data-reason="${r}"
+        aria-pressed="${state.readyMix?.delay_reason === r}">${r}</button>`).join('')}
+    </div>`;
+  box.querySelectorAll('button[data-min]').forEach((b) => {
+    b.onclick = () => { state.readyMix.delay_minutes = Number(b.dataset.min); renderSummary(); };
+  });
+  box.querySelectorAll('button[data-reason]').forEach((b) => {
+    b.onclick = () => { state.readyMix.delay_reason = b.dataset.reason; renderSummary(); };
+  });
+}
+
+/** §21/§22 '아니오' 일 때만 나온다. 바뀐 것만 적는다. */
+function renderDefaultEditor(kind) {
+  const isLabor = kind === 'labor';
+  const box = $(isLabor ? '#laborDetail' : '#equipDetail');
+  if (!box) return;
+  const list = isLabor ? state.defaults.labor : state.defaults.equipment;
+  const changes = isLabor ? state.laborChanges : state.equipChanges;
+  const keyOf = (x) => (isLabor ? x.role_name : x.equipment_name);
+  const valOf = (x) => (isLabor ? x.headcount : x.quantity);
+  const changed = new Map(changes.map((c) => [keyOf(c), isLabor ? c.headcount : c.quantity]));
+
+  if (list.length === 0) {
+    box.innerHTML = '<p class="muted" style="font-size:17px">기본설정이 없습니다. 본사에 등록을 요청하십시오.</p>';
+    return;
+  }
+  box.innerHTML = `
+    <p class="muted" style="font-size:17px;margin-top:12px">바뀐 것만 적으십시오.</p>
+    <div class="rowlist">
+      ${list.map((x) => `
+        <div class="row"><span class="no">${keyOf(x)}</span>
+          <input inputmode="decimal" data-key="${keyOf(x)}"
+                 placeholder="${valOf(x)}" value="${changed.get(keyOf(x)) ?? ''}"></div>`).join('')}
+    </div>`;
+  box.querySelectorAll('input[data-key]').forEach((i) => {
+    i.onchange = () => {
+      const key = i.dataset.key;
+      const v = i.value.trim();
+      const arr = isLabor ? state.laborChanges : state.equipChanges;
+      const idx = arr.findIndex((c) => keyOf(c) === key);
+      if (v === '') { if (idx >= 0) arr.splice(idx, 1); return; }
+      const entry = isLabor ? { role_name: key, headcount: v } : { equipment_name: key, quantity: v };
+      if (idx >= 0) arr[idx] = entry; else arr.push(entry);
+    };
+  });
 }
 
 /** 아니오를 골랐을 때만 나온다. 다른 공은 계획심도를 그대로 쓴다 (§16). */
@@ -337,24 +576,47 @@ async function renderGroundOptions() {
 async function submitDaily() {
   const btn = $('#submit');
   btn.disabled = true; btn.textContent = '저장 중…';
+
+  const payload = {
+    work_date: state.today.date,
+    from: state.pick.from, to: state.pick.to,
+    depth_same_as_plan: state.depthSame,
+    depth_exceptions: Object.entries(state.depthExceptions)
+      .map(([hole_no, actual_depth_total]) => ({ hole_no, actual_depth_total })),
+    ground_notes: state.groundNotes,
+    labor_same_as_default: state.laborSame !== false,
+    labor_changes: state.laborChanges,
+    equipment_same_as_default: state.equipSame !== false,
+    equipment_changes: state.equipChanges,
+    ready_mix: state.readyMix,
+    submit: true,
+  };
+  const requestId = newRequestId();
+
   try {
-    const r = await api(`/field/sites/${state.siteId}/daily-work`, {
+    await api(`/field/sites/${state.siteId}/daily-work`, {
       method: 'POST',
-      body: JSON.stringify({
-        work_date: state.today.date,
-        from: state.pick.from, to: state.pick.to,
-        depth_same_as_plan: state.depthSame,
-        depth_exceptions: Object.entries(state.depthExceptions)
-          .map(([hole_no, actual_depth_total]) => ({ hole_no, actual_depth_total })),
-        ground_notes: state.groundNotes,
-        submit: true,
-      }),
+      headers: { 'X-Client-Request-Id': requestId },
+      body: JSON.stringify(payload),
     });
-    toast(`${r.today_hole_count}공 입력완료`);
+    toast('입력완료');
     await openMain();
   } catch (e) {
-    toast(e.message);
-    btn.disabled = false; btn.textContent = '입력완료';
+    if (e.offline) {
+      // 통신이 안 되면 기기에 쌓아 두고 나중에 보낸다.
+      // 같은 요청 ID 를 쓰므로 두 번 저장되지 않는다.
+      await enqueue({
+        id: requestId, request_id: requestId, queued_at: Date.now(),
+        path: `/field/sites/${state.siteId}/daily-work`, payload,
+        label: `${state.today.date} ${payload.from}~${payload.to}`,
+      });
+      state.pending = await pendingCount();
+      toast('통신이 안 되어 저장 대기로 넘겼습니다. 통신되면 자동으로 보냅니다.', 4000);
+      await openMain();
+    } else {
+      toast(e.message);
+      btn.disabled = false; btn.textContent = '입력완료';
+    }
   }
 }
 
@@ -371,7 +633,9 @@ async function boot() {
         localStorage.setItem('rfcip.siteId', state.siteId);
       } else return renderSitePicker();
     }
+    state.pending = await pendingCount();
     await openMain();
+    await flushQueue();
   } catch (e) { renderLogin(e.message); }
 }
 

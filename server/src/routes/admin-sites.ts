@@ -171,3 +171,82 @@ adminSiteRouter.post('/:siteId/design-params', async (req, res, next) => {
     res.status(201).json({ design_params: rows });
   } catch (e) { next(e); }
 });
+
+/* ------------------------------ STEP 10 : 기본 인원 / 기본 장비 (§21, §22) */
+/**
+ * 직종·장비 목록을 시스템이 강제하지 않는다. 현장이 정한다.
+ * 단가는 여기서 받지 않는다. 내부원가는 private_cost 에만 둔다 (§29).
+ */
+const laborInput = z.object({
+  role_name: z.string().min(1).max(50),
+  headcount: z.number().nonnegative().max(999),
+  sort_order: z.number().int().min(0).max(999).default(0),
+  is_active: z.boolean().default(true),
+  note: z.string().max(200).optional(),
+});
+
+adminSiteRouter.post('/:siteId/default-labor', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const p = z.union([laborInput, z.array(laborInput).min(1).max(50)]).safeParse(req.body);
+    if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '기본 인원이 올바르지 않습니다.');
+    const items = Array.isArray(p.data) ? p.data : [p.data];
+
+    const rows = await withSession(req.actor!, async (c) => {
+      const out = [];
+      for (const it of items) {
+        const r = await c.query(
+          `INSERT INTO core.site_default_labor
+             (site_id, role_name, headcount, sort_order, is_active, note, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (site_id, role_name) DO UPDATE
+             SET headcount = EXCLUDED.headcount, sort_order = EXCLUDED.sort_order,
+                 is_active = EXCLUDED.is_active, note = EXCLUDED.note
+           RETURNING id, role_name, headcount, sort_order, is_active, note`,
+          [siteId, it.role_name, it.headcount, it.sort_order, it.is_active,
+           it.note ?? null, req.actor!.userId]);
+        out.push(r.rows[0]);
+      }
+      return out;
+    });
+    res.status(201).json({ default_labor: rows });
+  } catch (e) { next(e); }
+});
+
+const equipmentInput = z.object({
+  equipment_name: z.string().min(1).max(50),
+  charge_type: z.enum(['DAILY', 'MONTHLY', 'OTHER']),
+  quantity: z.number().nonnegative().max(999).default(1),
+  sort_order: z.number().int().min(0).max(999).default(0),
+  is_active: z.boolean().default(true),
+  note: z.string().max(200).optional(),
+});
+
+adminSiteRouter.post('/:siteId/default-equipment', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const p = z.union([equipmentInput, z.array(equipmentInput).min(1).max(50)]).safeParse(req.body);
+    if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '기본 장비가 올바르지 않습니다.');
+    const items = Array.isArray(p.data) ? p.data : [p.data];
+
+    const rows = await withSession(req.actor!, async (c) => {
+      const out = [];
+      for (const it of items) {
+        const r = await c.query(
+          `INSERT INTO core.site_default_equipment
+             (site_id, equipment_name, charge_type, quantity, sort_order, is_active, note, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (site_id, equipment_name) DO UPDATE
+             SET charge_type = EXCLUDED.charge_type, quantity = EXCLUDED.quantity,
+                 sort_order = EXCLUDED.sort_order, is_active = EXCLUDED.is_active,
+                 note = EXCLUDED.note
+           RETURNING id, equipment_name, charge_type, quantity, sort_order, is_active, note`,
+          [siteId, it.equipment_name, it.charge_type, it.quantity, it.sort_order,
+           it.is_active, it.note ?? null, req.actor!.userId]);
+        out.push(r.rows[0]);
+      }
+      return out;
+    });
+    res.status(201).json({ default_equipment: rows });
+  } catch (e) { next(e); }
+});

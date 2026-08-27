@@ -16,12 +16,18 @@ import { z } from 'zod';
 import { withSession, type SessionClient } from '../db/pool.js';
 import { badRequest, notFound } from '../http/errors.js';
 import { requireAuth } from '../http/context.js';
+import { findStored, remember, requestId } from '../http/idempotency.js';
 
 export const fieldRouter = Router();
 fieldRouter.use(requireAuth);
 
 const uuid = z.string().uuid();
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '날짜 형식은 YYYY-MM-DD 입니다.');
+
+/** 수량은 문자열로 다뤄 부동소수점 오차를 만들지 않는다 (§46). */
+const amount = (label: string) => z.union([z.number(), z.string()])
+  .transform((v) => String(v))
+  .refine((v) => /^\d+(\.\d+)?$/.test(v), `${label}은(는) 0 이상의 숫자여야 합니다.`);
 
 interface ProgressRow {
   total_holes: number; completed_holes: number; today_holes: number; remaining_holes: number;
@@ -213,6 +219,34 @@ const saveInput = rangeInput.extend({
   memo: z.string().max(500).optional(),
   /** true 면 입력완료(SUBMITTED) 상태로 만든다 */
   submit: z.boolean().default(true),
+  /** 오프라인 큐 재전송 시 중복 저장을 막는 요청 ID */
+  client_request_id: z.string().uuid().optional(),
+
+  /** §21 오늘 인원은 기본설정과 동일합니까? 아니오일 때만 변경분을 받는다. */
+  labor_same_as_default: z.boolean().default(true),
+  labor_changes: z.array(z.object({
+    role_name: z.string().min(1).max(50),
+    headcount: amount('인원'),
+    note: z.string().max(200).optional(),
+  })).max(50).optional(),
+
+  /** §22 오늘 장비는 기본설정과 동일합니까? 변경만 입력한다. */
+  equipment_same_as_default: z.boolean().default(true),
+  equipment_changes: z.array(z.object({
+    equipment_name: z.string().min(1).max(50),
+    quantity: amount('수량'),
+    charge_type: z.enum(['DAILY', 'MONTHLY', 'OTHER']).optional(),
+    note: z.string().max(200).optional(),
+  })).max(50).optional(),
+
+  /** §23 레미콘 */
+  ready_mix: z.object({
+    quantity_m3: amount('반입량'),
+    has_delay: z.boolean().default(false),
+    delay_minutes: z.number().int().positive().max(1440).optional(),
+    delay_reason: z.string().max(50).optional(),
+    memo: z.string().max(300).optional(),
+  }).optional(),
 });
 
 fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
@@ -222,8 +256,16 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
     if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '입력이 올바르지 않습니다.');
     const d = p.data;
     const date = d.work_date ?? new Date().toISOString().slice(0, 10);
+    const reqId = requestId(req);
 
     const result = await withSession(req.actor!, async (c) => {
+      // 오프라인 큐가 같은 요청을 다시 보냈다면 처음 처리한 응답을 그대로 돌려준다.
+      // 이것이 없으면 재전송 때마다 레미콘·공수가 두 배로 쌓인다.
+      if (reqId) {
+        const stored = await findStored(c, reqId);
+        if (stored) return { ...(stored.body as object), replayed: true };
+      }
+
       const rows = await c.query(
         'SELECT * FROM core.fn_resolve_hole_range($1,$2,$3,$4,$5)',
         [siteId, d.from, d.to ?? d.from, d.exclude ?? null, d.hole_type_code ?? null]);
@@ -240,13 +282,18 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
       }
 
       const work = await c.query(
-        `INSERT INTO core.daily_work (site_id, work_date, status, next_day_plan, memo, created_by)
-         VALUES ($1,$2,'DRAFT',$3,$4,$5)
+        `INSERT INTO core.daily_work
+           (site_id, work_date, status, next_day_plan, memo,
+            labor_same_as_default, equipment_same_as_default, created_by)
+         VALUES ($1,$2,'DRAFT',$3,$4,$5,$6,$7)
          ON CONFLICT (site_id, work_date) DO UPDATE
            SET next_day_plan = COALESCE(EXCLUDED.next_day_plan, core.daily_work.next_day_plan),
-               memo = COALESCE(EXCLUDED.memo, core.daily_work.memo)
+               memo = COALESCE(EXCLUDED.memo, core.daily_work.memo),
+               labor_same_as_default = EXCLUDED.labor_same_as_default,
+               equipment_same_as_default = EXCLUDED.equipment_same_as_default
          RETURNING id`,
-        [siteId, date, d.next_day_plan ?? null, d.memo ?? null, req.actor!.userId]);
+        [siteId, date, d.next_day_plan ?? null, d.memo ?? null,
+         d.labor_same_as_default, d.equipment_same_as_default, req.actor!.userId]);
       const workId = work.rows[0]!.id as string;
 
       const exceptions = new Map(
@@ -288,6 +335,59 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
         }
       }
 
+      // §21 인원 — '동일합니다' 면 변경행을 남기지 않는다
+      if (d.labor_same_as_default) {
+        await c.query('DELETE FROM core.daily_labor WHERE daily_work_id=$1', [workId]);
+      } else {
+        for (const l of d.labor_changes ?? []) {
+          await c.query(
+            `INSERT INTO core.daily_labor (daily_work_id, role_name, headcount, note)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (daily_work_id, role_name) DO UPDATE
+               SET headcount = EXCLUDED.headcount, note = EXCLUDED.note`,
+            [workId, l.role_name, l.headcount, l.note ?? null]);
+        }
+      }
+
+      // §22 장비 — 변경만 입력한다
+      if (d.equipment_same_as_default) {
+        await c.query('DELETE FROM core.daily_equipment WHERE daily_work_id=$1', [workId]);
+      } else {
+        for (const e of d.equipment_changes ?? []) {
+          await c.query(
+            `INSERT INTO core.daily_equipment
+               (daily_work_id, equipment_name, quantity, charge_type, note)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (daily_work_id, equipment_name) DO UPDATE
+               SET quantity = EXCLUDED.quantity, charge_type = EXCLUDED.charge_type,
+                   note = EXCLUDED.note`,
+            [workId, e.equipment_name, e.quantity, e.charge_type ?? null, e.note ?? null]);
+        }
+      }
+
+      // §23 레미콘
+      let readyMix: Record<string, unknown> | null = null;
+      if (d.ready_mix) {
+        const rm = d.ready_mix;
+        if (rm.has_delay && rm.delay_minutes === undefined) {
+          throw badRequest('공급지연이 있으면 지연시간을 입력해야 합니다.', 'DELAY_MINUTES_REQUIRED');
+        }
+        const r = await c.query(
+          `INSERT INTO core.daily_ready_mix
+             (daily_work_id, quantity_m3, has_delay, delay_minutes, delay_reason, memo, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (daily_work_id) DO UPDATE
+             SET quantity_m3 = EXCLUDED.quantity_m3, has_delay = EXCLUDED.has_delay,
+                 delay_minutes = EXCLUDED.delay_minutes, delay_reason = EXCLUDED.delay_reason,
+                 memo = EXCLUDED.memo
+           RETURNING id, quantity_m3, has_delay, delay_minutes, delay_reason`,
+          [workId, rm.quantity_m3, rm.has_delay,
+           rm.has_delay ? rm.delay_minutes ?? null : null,
+           rm.has_delay ? rm.delay_reason ?? null : null,
+           rm.memo ?? null, req.actor!.userId]);
+        readyMix = r.rows[0] ?? null;
+      }
+
       const applied = await c.query('SELECT core.fn_apply_daily_work($1) AS n', [workId]);
 
       if (d.submit) {
@@ -300,15 +400,28 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
         [fresh.map((h) => h.hole_id)]);
       const progress = await loadProgress(c, siteId, date);
 
-      return {
+      const payload = {
         daily_work_id: workId, work_date: date,
         status: d.submit ? 'SUBMITTED' : 'DRAFT',
         today_hole_count: Number(applied.rows[0]!.n),
         today_hole_numbers: fresh.map((h) => h.hole_no),
         skipped_already_done: all.length - fresh.length,
         layer_summary: layer.rows,
+        ready_mix: readyMix,
+        labor: (await c.query(
+          `SELECT role_name, headcount, is_override FROM core.v_daily_labor_effective
+            WHERE daily_work_id=$1 ORDER BY sort_order, role_name`, [workId])).rows,
+        equipment: (await c.query(
+          `SELECT equipment_name, quantity, charge_type, is_override
+             FROM core.v_daily_equipment_effective
+            WHERE daily_work_id=$1 ORDER BY sort_order, equipment_name`, [workId])).rows,
         progress,
       };
+
+      if (reqId) {
+        await remember(c, reqId, req.actor!.userId, 'POST /field/daily-work', 201, payload);
+      }
+      return payload;
     });
     res.status(201).json(result);
   } catch (e) { next(e); }
@@ -360,5 +473,51 @@ fieldRouter.delete('/sites/:siteId/daily-work/:date', async (req, res, next) => 
     });
     if (!result) throw notFound('해당 날짜의 입력이 없습니다.');
     res.json({ work_date: date, reverted_holes: result.reverted });
+  } catch (e) { next(e); }
+});
+
+/* ============================================ §21/§22 기본 인원·장비 조회 */
+/**
+ * 일일 화면이 "기본설정과 동일합니까?" 를 묻기 위해 필요한 목록.
+ * 단가는 들어있지 않다 (§29).
+ */
+fieldRouter.get('/sites/:siteId/defaults', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const data = await withSession(req.actor!, async (c) => {
+      const labor = await c.query(
+        `SELECT role_name, headcount, note FROM core.site_default_labor
+          WHERE site_id=$1 AND is_active ORDER BY sort_order, role_name`, [siteId]);
+      const equipment = await c.query(
+        `SELECT equipment_name, charge_type, quantity, note FROM core.site_default_equipment
+          WHERE site_id=$1 AND is_active ORDER BY sort_order, equipment_name`, [siteId]);
+      return { labor: labor.rows, equipment: equipment.rows };
+    });
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+/** §23 공급지연 선택지. 시스템이 목록을 강제하지 않도록 한곳에 모아 둔다. */
+fieldRouter.get('/ready-mix-options', requireAuth, (_req, res) => {
+  res.json({
+    delay_minutes: [30, 60, 90, 120],
+    delay_reasons: ['레미콘공장', '원도급', '검측', '현장조건', '기타'],
+  });
+});
+
+/**
+ * 계획 레미콘량 (§23, §46)
+ * 산출근거 방식 그대로: (π × D²)/4 × 연장 × (1 + 할증률)
+ * π·직경·할증률은 현장 설계 파라미터를 쓴다.
+ */
+fieldRouter.get('/sites/:siteId/planned-ready-mix', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const length = z.coerce.number().nonnegative().parse(req.query.length ?? 0);
+    const row = await withSession(req.actor!, async (c) => {
+      const r = await c.query('SELECT * FROM core.fn_planned_ready_mix($1,$2)', [siteId, length]);
+      return r.rows[0];
+    });
+    res.json(row);
   } catch (e) { next(e); }
 });
