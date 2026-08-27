@@ -1,0 +1,364 @@
+/**
+ * PHASE 6 — 모바일 오늘 작업입력 (Master Prompt §15, §16, §18, §19, §20, §46)
+ *
+ * 현장관리자가 하루 1~3분 안에 끝내야 한다 (§0, §52).
+ * 그래서 화면 하나에서 다음만 묻는다.
+ *
+ *   1. 오늘 뚫은 번호 범위          (시작 / 종료 / 제외)
+ *   2. 계획심도와 동일합니까?        [예] / [아니오]
+ *   3. 지반조건에 다른 점 있었습니까? [없음] / [있음]
+ *   4. [입력완료]
+ *
+ * 지층별 수량·공정률·누계는 전부 자동집계한다. 다시 묻지 않는다 (§20).
+ */
+import { Router } from 'express';
+import { z } from 'zod';
+import { withSession, type SessionClient } from '../db/pool.js';
+import { badRequest, notFound } from '../http/errors.js';
+import { requireAuth } from '../http/context.js';
+
+export const fieldRouter = Router();
+fieldRouter.use(requireAuth);
+
+const uuid = z.string().uuid();
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '날짜 형식은 YYYY-MM-DD 입니다.');
+
+interface ProgressRow {
+  total_holes: number; completed_holes: number; today_holes: number; remaining_holes: number;
+  total_quantity: string; completed_quantity: string; remaining_quantity: string;
+  progress_rate: string;
+  /** CONTRACT_QUANTITY = 계약수량 기준(§36) / DESIGN_DEPTH = 계약수량 미연결로 계획심도 대용 */
+  quantity_basis: 'CONTRACT_QUANTITY' | 'DESIGN_DEPTH' | 'NONE';
+}
+
+async function loadProgress(c: SessionClient, siteId: string, date: string): Promise<ProgressRow> {
+  const r = await c.query('SELECT * FROM core.fn_site_progress($1,$2)', [siteId, date]);
+  return r.rows[0] as unknown as ProgressRow;
+}
+
+/* ============================================================ §18 메인화면 */
+/**
+ * 오늘 화면에 필요한 것을 한 번에 준다.
+ * 화면 이동을 줄이기 위해서다 (§47: 화면을 여러 번 이동하는 구조를 피한다).
+ */
+fieldRouter.get('/sites/:siteId/today', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const date = isoDate.optional().parse(req.query.date as string | undefined)
+      ?? new Date().toISOString().slice(0, 10);
+
+    const data = await withSession(req.actor!, async (c) => {
+      const site = await c.query(
+        'SELECT id, site_code, site_name, status FROM core.site WHERE id=$1', [siteId]);
+      if (!site.rowCount) return null;
+
+      const progress = await loadProgress(c, siteId, date);
+
+      const work = await c.query(
+        `SELECT id, work_date, status, next_day_plan, memo, submitted_at
+           FROM core.daily_work WHERE site_id=$1 AND work_date=$2`, [siteId, date]);
+
+      // 어제 입력한 익일계획을 오늘의 기본값으로 보여준다 (§1-5 전일값 재사용)
+      const prev = await c.query(
+        `SELECT work_date, next_day_plan FROM core.daily_work
+          WHERE site_id=$1 AND work_date < $2 AND next_day_plan IS NOT NULL
+          ORDER BY work_date DESC LIMIT 1`, [siteId, date]);
+
+      // 다음에 뚫을 번호 = 미시공 중 가장 앞선 것 (§1-5 기본값 제안)
+      const nextHole = await c.query(
+        `SELECT hole_no FROM core.hole_master
+          WHERE site_id=$1 AND status='NOT_STARTED'
+          ORDER BY drawing_sequence NULLS LAST, sort_key LIMIT 1`, [siteId]);
+
+      const todayHoles = await c.query(
+        `SELECT h.hole_no, h.design_depth_total, d.depth_same_as_plan, d.actual_depth_total
+           FROM core.daily_work_hole d
+           JOIN core.hole_master h ON h.id = d.hole_id
+           JOIN core.daily_work w ON w.id = d.daily_work_id
+          WHERE w.site_id=$1 AND w.work_date=$2
+          ORDER BY h.drawing_sequence NULLS LAST, h.sort_key`, [siteId, date]);
+
+      let layerSummary: unknown[] = [];
+      if (todayHoles.rowCount) {
+        const ids = await c.query(
+          `SELECT d.hole_id FROM core.daily_work_hole d
+             JOIN core.daily_work w ON w.id = d.daily_work_id
+            WHERE w.site_id=$1 AND w.work_date=$2`, [siteId, date]);
+        const s = await c.query('SELECT * FROM core.fn_daily_layer_summary($1)',
+          [ids.rows.map((x: { hole_id: string }) => x.hole_id)]);
+        layerSummary = s.rows;
+      }
+
+      return {
+        site: site.rows[0], date,
+        progress, daily_work: work.rows[0] ?? null,
+        today_holes: todayHoles.rows,
+        today_layer_summary: layerSummary,
+        previous_next_day_plan: prev.rows[0]?.next_day_plan ?? null,
+        suggested_start_hole_no: nextHole.rows[0]?.hole_no ?? null,
+      };
+    });
+    if (!data) throw notFound('현장을 찾을 수 없습니다.');
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+/* ====================================================== §19/§20 범위 자동집계 */
+const rangeInput = z.object({
+  work_date: isoDate.optional(),
+  from: z.string().min(1).max(60),
+  to: z.string().min(1).max(60).optional(),
+  exclude: z.array(z.string().max(60)).max(500).optional(),
+  hole_type_code: z.string().max(20).optional(),
+});
+
+/**
+ * 범위를 고르면 즉시 계산해서 보여준다. 저장하지 않는다.
+ * "금일 공수 / 금일 천공연장 / 지층별 수량 / 누계 / 잔여 / 공정률" (§19)
+ */
+fieldRouter.post('/sites/:siteId/daily-work/preview', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const p = rangeInput.safeParse(req.body);
+    if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '입력이 올바르지 않습니다.');
+    const date = p.data.work_date ?? new Date().toISOString().slice(0, 10);
+
+    const data = await withSession(req.actor!, async (c) => {
+      const rows = await c.query(
+        'SELECT * FROM core.fn_resolve_hole_range($1,$2,$3,$4,$5)',
+        [siteId, p.data.from, p.data.to ?? p.data.from,
+         p.data.exclude ?? null, p.data.hole_type_code ?? null]);
+      const holes = rows.rows as unknown as {
+        hole_id: string; hole_no: string; design_depth_total: string | null;
+        current_profile_id: string | null }[];
+
+      // 이미 완료된 번호는 다시 세지 않는다 (중복입력 방지, §1-2)
+      const done = await c.query(
+        `SELECT h.id, h.hole_no, h.construction_date
+           FROM core.hole_master h
+          WHERE h.id = ANY($1) AND h.status='COMPLETED'`,
+        [holes.map((h) => h.hole_id)]);
+      const doneIds = new Set(done.rows.map((x: { id: string }) => x.id));
+      const fresh = holes.filter((h) => !doneIds.has(h.hole_id));
+
+      const layer = await c.query('SELECT * FROM core.fn_daily_layer_summary($1)',
+        [fresh.map((h) => h.hole_id)]);
+      const progress = await loadProgress(c, siteId, date);
+
+      return { holes, fresh, done: done.rows, layer: layer.rows, progress };
+    });
+
+    const issues: { code: string; severity: string; message: string }[] = [];
+    if (data.holes.length === 0) {
+      issues.push({ code: 'NO_HOLE_IN_RANGE', severity: 'ERROR', message: '선택한 범위에 천공번호가 없습니다.' });
+    }
+    if (data.done.length > 0) {
+      issues.push({
+        code: 'ALREADY_COMPLETED', severity: 'WARN',
+        message: `${data.done.length}개는 이미 완료된 번호라 제외했습니다: `
+          + data.done.slice(0, 10).map((d: { hole_no: string }) => d.hole_no).join(', '),
+      });
+    }
+    const noProfile = data.fresh.filter((h) => !h.current_profile_id);
+    if (noProfile.length > 0) {
+      issues.push({
+        code: 'HOLE_WITHOUT_PROFILE', severity: 'WARN',
+        message: `${noProfile.length}개는 지반조건이 없어 지층별 수량이 집계되지 않습니다.`,
+      });
+    }
+
+    const todayLength = data.fresh.reduce((a, h) => a + Number(h.design_depth_total ?? 0), 0);
+    const p2 = data.progress;
+
+    res.json({
+      work_date: p.data.work_date ?? new Date().toISOString().slice(0, 10),
+      today_hole_count: data.fresh.length,
+      today_hole_numbers: data.fresh.map((h) => h.hole_no),
+      today_planned_length: Number(todayLength.toFixed(3)),
+      layer_summary: data.layer,
+      excluded_already_done: data.done.map((d: { hole_no: string }) => d.hole_no),
+      // 누계는 오늘 입력분을 더한 예상치다 (§19)
+      cumulative_hole_count: p2.completed_holes + data.fresh.length,
+      cumulative_quantity: Number((Number(p2.completed_quantity) + todayLength).toFixed(3)),
+      remaining_hole_count: p2.remaining_holes - data.fresh.length,
+      remaining_quantity: Number((Number(p2.remaining_quantity) - todayLength).toFixed(3)),
+      total_hole_count: p2.total_holes,
+      quantity_basis: p2.quantity_basis,
+      progress_rate_after: Number(p2.total_quantity) === 0 ? 0
+        : Number((((Number(p2.completed_quantity) + todayLength)
+            / Number(p2.total_quantity)) * 100).toFixed(1)),
+      issues,
+      can_save: issues.filter((i) => i.severity === 'ERROR').length === 0,
+    });
+  } catch (e) { next(e); }
+});
+
+/* ====================================================== 저장 (§15, §16) */
+const saveInput = rangeInput.extend({
+  /** §16 계획심도와 동일합니까? — 기본은 '예'. 예외만 따로 받는다. */
+  depth_same_as_plan: z.boolean().default(true),
+  depth_exceptions: z.array(z.object({
+    hole_no: z.string().min(1).max(60),
+    actual_depth_total: z.union([z.number(), z.string()])
+      .transform((v) => String(v))
+      .refine((v) => /^\d+(\.\d+)?$/.test(v) && Number(v) > 0, '실제심도는 0보다 커야 합니다.'),
+  })).max(500).optional(),
+  /** §15 지반조건에 다른 점이 있었습니까? — 기본은 '없음'. */
+  ground_notes: z.array(z.object({
+    note_type: z.string().min(1).max(50),
+    memo: z.string().max(500).optional(),
+    hole_nos: z.array(z.string().max(60)).max(200).optional(),
+  })).max(20).optional(),
+  next_day_plan: z.string().max(300).optional(),
+  memo: z.string().max(500).optional(),
+  /** true 면 입력완료(SUBMITTED) 상태로 만든다 */
+  submit: z.boolean().default(true),
+});
+
+fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const p = saveInput.safeParse(req.body);
+    if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '입력이 올바르지 않습니다.');
+    const d = p.data;
+    const date = d.work_date ?? new Date().toISOString().slice(0, 10);
+
+    const result = await withSession(req.actor!, async (c) => {
+      const rows = await c.query(
+        'SELECT * FROM core.fn_resolve_hole_range($1,$2,$3,$4,$5)',
+        [siteId, d.from, d.to ?? d.from, d.exclude ?? null, d.hole_type_code ?? null]);
+      const all = rows.rows as unknown as { hole_id: string; hole_no: string }[];
+      if (all.length === 0) throw badRequest('선택한 범위에 천공번호가 없습니다.', 'NO_HOLE_IN_RANGE');
+
+      const done = await c.query(
+        `SELECT id FROM core.hole_master WHERE id = ANY($1) AND status='COMPLETED'`,
+        [all.map((h) => h.hole_id)]);
+      const doneIds = new Set(done.rows.map((x: { id: string }) => x.id));
+      const fresh = all.filter((h) => !doneIds.has(h.hole_id));
+      if (fresh.length === 0) {
+        throw badRequest('선택한 번호가 모두 이미 완료되었습니다.', 'ALL_ALREADY_COMPLETED');
+      }
+
+      const work = await c.query(
+        `INSERT INTO core.daily_work (site_id, work_date, status, next_day_plan, memo, created_by)
+         VALUES ($1,$2,'DRAFT',$3,$4,$5)
+         ON CONFLICT (site_id, work_date) DO UPDATE
+           SET next_day_plan = COALESCE(EXCLUDED.next_day_plan, core.daily_work.next_day_plan),
+               memo = COALESCE(EXCLUDED.memo, core.daily_work.memo)
+         RETURNING id`,
+        [siteId, date, d.next_day_plan ?? null, d.memo ?? null, req.actor!.userId]);
+      const workId = work.rows[0]!.id as string;
+
+      const exceptions = new Map(
+        (d.depth_exceptions ?? []).map((e) => [e.hole_no, e.actual_depth_total]));
+      const unknownHoleNos = [...exceptions.keys()]
+        .filter((n) => !fresh.some((h) => h.hole_no === n));
+      if (unknownHoleNos.length > 0) {
+        throw badRequest(
+          `실제심도를 입력한 ${unknownHoleNos.join(', ')} 이(가) 오늘 선택범위에 없습니다.`,
+          'DEPTH_EXCEPTION_NOT_IN_RANGE');
+      }
+
+      for (const h of fresh) {
+        const actual = exceptions.get(h.hole_no);
+        const same = actual === undefined ? d.depth_same_as_plan : false;
+        await c.query(
+          `INSERT INTO core.daily_work_hole
+             (daily_work_id, hole_id, depth_same_as_plan, actual_depth_total)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (daily_work_id, hole_id) DO UPDATE
+             SET depth_same_as_plan = EXCLUDED.depth_same_as_plan,
+                 actual_depth_total = EXCLUDED.actual_depth_total`,
+          [workId, h.hole_id, same, actual ?? null]);
+      }
+
+      // §15 특이사항은 '있음' 일 때만 저장된다
+      for (const n of d.ground_notes ?? []) {
+        const note = await c.query(
+          `INSERT INTO core.daily_ground_note (daily_work_id, note_type, memo, created_by)
+           VALUES ($1,$2,$3,$4) RETURNING id`,
+          [workId, n.note_type, n.memo ?? null, req.actor!.userId]);
+        for (const holeNo of n.hole_nos ?? []) {
+          const hole = fresh.find((h) => h.hole_no === holeNo);
+          if (hole) {
+            await c.query(
+              `INSERT INTO core.daily_ground_note_hole (note_id, hole_id)
+               VALUES ($1,$2) ON CONFLICT DO NOTHING`, [note.rows[0]!.id, hole.hole_id]);
+          }
+        }
+      }
+
+      const applied = await c.query('SELECT core.fn_apply_daily_work($1) AS n', [workId]);
+
+      if (d.submit) {
+        await c.query(
+          `UPDATE core.daily_work SET status='SUBMITTED', submitted_at=now(), submitted_by=$2
+            WHERE id=$1`, [workId, req.actor!.userId]);
+      }
+
+      const layer = await c.query('SELECT * FROM core.fn_daily_layer_summary($1)',
+        [fresh.map((h) => h.hole_id)]);
+      const progress = await loadProgress(c, siteId, date);
+
+      return {
+        daily_work_id: workId, work_date: date,
+        status: d.submit ? 'SUBMITTED' : 'DRAFT',
+        today_hole_count: Number(applied.rows[0]!.n),
+        today_hole_numbers: fresh.map((h) => h.hole_no),
+        skipped_already_done: all.length - fresh.length,
+        layer_summary: layer.rows,
+        progress,
+      };
+    });
+    res.status(201).json(result);
+  } catch (e) { next(e); }
+});
+
+/** 특이사항 선택지 — 현장별 지층종류에서 만들어 준다. 하드코딩하지 않는다 (§7, §15). */
+fieldRouter.get('/sites/:siteId/ground-note-options', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const rows = await withSession(req.actor!, async (c) => {
+      const r = await c.query(
+        `SELECT code, name, status FROM core.ground_type
+          WHERE site_id=$1 AND is_active ORDER BY sort_order, code`, [siteId]);
+      return r.rows as { code: string; name: string; status: string }[];
+    });
+    const options = [
+      ...rows.map((g) => ({
+        note_type: `${g.name}구간 차이`,
+        hint: g.status === 'PROVISIONAL' ? '계획수량 0인 미확정 지층' : null,
+      })),
+      { note_type: '예상 외 지층', hint: null },
+      { note_type: '지하수', hint: null },
+      { note_type: '기타', hint: null },
+    ];
+    res.json({ options });
+  } catch (e) { next(e); }
+});
+
+/** 오늘 입력 취소 — 잘못 넣었을 때 되돌린다 (§47 [수정]) */
+fieldRouter.delete('/sites/:siteId/daily-work/:date', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const date = isoDate.parse(req.params.date);
+    const result = await withSession(req.actor!, async (c) => {
+      const work = await c.query(
+        'SELECT id FROM core.daily_work WHERE site_id=$1 AND work_date=$2', [siteId, date]);
+      if (!work.rowCount) return null;
+      const workId = work.rows[0]!.id as string;
+
+      // 완료 처리했던 천공번호를 미시공으로 되돌린다
+      const reverted = await c.query(
+        `UPDATE core.hole_master h
+            SET status='NOT_STARTED', construction_date=NULL, actual_depth_total=NULL
+           FROM core.daily_work_hole d
+          WHERE d.daily_work_id=$1 AND h.id=d.hole_id
+          RETURNING h.hole_no`, [workId]);
+      await c.query('DELETE FROM core.daily_work WHERE id=$1', [workId]);
+      return { reverted: reverted.rows.length };
+    });
+    if (!result) throw notFound('해당 날짜의 입력이 없습니다.');
+    res.json({ work_date: date, reverted_holes: result.reverted });
+  } catch (e) { next(e); }
+});

@@ -1,0 +1,10 @@
+{
+  "name": "RF CIP 현장관리",
+  "short_name": "RF CIP",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f5f7",
+  "theme_color": "#1b5fd9",
+  "lang": "ko",
+  "icons": []
+}

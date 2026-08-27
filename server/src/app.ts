@@ -1,3 +1,5 @@
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { authRouter } from './routes/auth.js';
 import { siteRouter } from './routes/sites.js';
@@ -9,6 +11,7 @@ import { adminGroundRouter } from './routes/admin-ground.js';
 import { groundAssignRouter } from './routes/admin-ground-assign.js';
 import { quantityImportRouter } from './routes/quantity-import.js';
 import { drawingImportRouter } from './routes/drawing-import.js';
+import { fieldRouter } from './routes/field-daily.js';
 import { HttpError } from './http/errors.js';
 import { logAccessDenied } from './http/context.js';
 
@@ -19,6 +22,11 @@ export function createApp() {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
+  // 모바일 PWA (§3 모바일 우선). 빌드 단계 없이 그대로 서빙한다.
+  const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../web');
+  app.use('/app', express.static(WEB_ROOT, { extensions: ['html'] }));
+  app.get('/', (_req, res) => res.redirect('/app/'));
+
   app.use('/api/auth', authRouter);
   app.use('/api/sites', siteRouter);
   app.use('/api/sites', holeRouter);
@@ -28,6 +36,7 @@ export function createApp() {
   app.use('/api/admin', groundAssignRouter);
   app.use('/api/admin', quantityImportRouter);
   app.use('/api/admin', drawingImportRouter);
+  app.use('/api/field', fieldRouter);
   app.use('/api', contractRouter);
 
   app.use((_req, res) => res.status(404).json({ error: 'NOT_FOUND', message: '경로를 찾을 수 없습니다.' }));

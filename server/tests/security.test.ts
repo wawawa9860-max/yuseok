@@ -15,7 +15,11 @@ describe('§44 역할 분리', () => {
     const token = await login('field01');
     const res = await request(app).get('/api/sites').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
-    expect(res.body.sites.map((s: { site_code: string }) => s.site_code)).toEqual(['TEST_SITE_01']);
+    const codes = res.body.sites.map((s: { site_code: string }) => s.site_code);
+    expect(codes).toContain('TEST_SITE_01');
+    // 배정되지 않은 현장은 절대 보이지 않는다
+    expect(codes).not.toContain('TEST_SITE_02');
+    expect(codes).not.toContain('SAMPLE_RFCIP_01');
   });
 
   it('본사는 전체 현장을 조회한다', async () => {

@@ -14,8 +14,9 @@ RF CIP(겹침 CIP) 전문건설 현장의 **천공번호 기반 통합 현장관
 | PHASE 3 | GROUND_TYPE + GROUND_PROFILE + 범위입력 | ✅ 완료 — [보고서](docs/PHASE_03_REPORT.md) |
 | PHASE 4 | 수량산출서 ↔ HOLE_MASTER 연결 | ✅ 완료 — [보고서](docs/PHASE_04_REPORT.md) |
 | PHASE 5 | 작업도면 ↔ 천공번호 연결 | ✅ 완료 — [보고서](docs/PHASE_05_REPORT.md) |
-| PHASE 6 | 모바일 오늘 작업입력 | 대기 |
-| PHASE 7~15 | — | 대기 |
+| PHASE 6 | 모바일 오늘 작업입력 | ✅ 완료 — [보고서](docs/PHASE_06_REPORT.md) |
+| PHASE 7 | 레미콘 / 인원 / 장비 | 대기 |
+| PHASE 8~15 | — | 대기 |
 
 ## 로컬 실행
 
@@ -36,6 +37,9 @@ npm --prefix server run test
 npm --prefix server run dev
 ```
 
+접속: 현장 모바일 화면은 <http://localhost:3000/app/> 입니다.
+휴대폰 브라우저에서 열어 홈 화면에 추가하면 앱처럼 쓸 수 있습니다 (PWA).
+
 테스트 계정 (시드): `head01`(본사) / `field01`~`field03`(현장관리자) / `partner01`(계약상대방)
 비밀번호는 모두 `test1234!` — **운영에서 사용 금지**.
 
@@ -51,6 +55,7 @@ server/src/domain/quantitySheet/  수량산출서 파싱·교차검증·패턴�
 server/tests/fixtures/            실제 수량산출서 (파서 회귀 테스트용)
 server/src/routes/ REST API
 server/tests/      권한/지반조건/API 자동 테스트
+web/               모바일 PWA (빌드 단계 없음). 서버가 /app 으로 서빙한다.
 storage/           로컬 파일 저장소 (도면·사진·영수증)
 db/seeds/          실제 수량산출서에서 추출한 테스트 데이터
 docs/              Master Prompt, 문서 분석·검토, Phase 보고서
