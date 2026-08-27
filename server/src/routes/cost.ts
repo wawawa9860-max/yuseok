@@ -278,7 +278,9 @@ costAdminRouter.use(requireAuth, requireRole('HEAD_OFFICE'));
 const laborRate = z.object({
   site_id: z.string().uuid().nullish(),
   role_name: z.string().min(1).max(50),
-  daily_rate: money,
+  /** DAILY=일당제(1공수 단가) / MONTHLY=월급제(월액) — §25 */
+  pay_type: z.enum(['DAILY', 'MONTHLY']).default('DAILY'),
+  rate: money,
   effective_from: isoDate,
   effective_to: isoDate.nullish(),
   note: z.string().max(200).nullish(),
@@ -294,14 +296,14 @@ costAdminRouter.post('/labor-rates', async (req, res, next) => {
       for (const it of items) {
         const r = await c.query(
           `INSERT INTO private_cost.labor_rate
-             (site_id, role_name, daily_rate, effective_from, effective_to, note, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)
+             (site_id, role_name, pay_type, rate, effective_from, effective_to, note, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
            ON CONFLICT (COALESCE(site_id, '00000000-0000-0000-0000-000000000000'::uuid),
                         role_name, effective_from)
-             DO UPDATE SET daily_rate = EXCLUDED.daily_rate,
+             DO UPDATE SET pay_type = EXCLUDED.pay_type, rate = EXCLUDED.rate,
                            effective_to = EXCLUDED.effective_to, note = EXCLUDED.note
-           RETURNING id, role_name, daily_rate, effective_from, effective_to`,
-          [it.site_id ?? null, it.role_name, it.daily_rate, it.effective_from,
+           RETURNING id, role_name, pay_type, rate, effective_from, effective_to`,
+          [it.site_id ?? null, it.role_name, it.pay_type, it.rate, it.effective_from,
            it.effective_to ?? null, it.note ?? null, req.actor!.userId]);
         out.push(r.rows[0]);
       }
@@ -349,7 +351,20 @@ costAdminRouter.post('/equipment-rates', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/** §25/§26 노무비·장비비 자동계산 반영 */
+const rateIssues = (rows: { cost_type: string; missing_rate_count: number }[]) =>
+  rows.filter((r) => r.missing_rate_count > 0).map((r) => ({
+    code: 'RATE_NOT_FOUND', severity: 'WARN',
+    message: `${r.cost_type}: 단가가 등록되지 않은 항목이 ${r.missing_rate_count}건 있어 `
+      + '그만큼 금액에서 빠졌습니다.',
+  }));
+
+/**
+ * §25/§26 노무비·장비비 자동계산 (하루)
+ *
+ * 계산은 그 날이 속한 달 전체를 다시 한다.
+ * 월액 전액으로 마감하는 달(FIXED)은 그 달의 공수 비율로 배분해야 하므로
+ * 하루만 떼어 계산할 수 없다.
+ */
 costAdminRouter.post('/daily-work/:dailyWorkId/calculate-cost', async (req, res, next) => {
   try {
     const dailyWorkId = uuid.parse(req.params.dailyWorkId);
@@ -358,15 +373,96 @@ costAdminRouter.post('/daily-work/:dailyWorkId/calculate-cost', async (req, res,
         'SELECT * FROM private_cost.fn_apply_calculated_cost($1)', [dailyWorkId]);
       return r.rows as { cost_type: string; amount: string; missing_rate_count: number }[];
     });
-    const missing = rows.filter((r) => r.missing_rate_count > 0);
-    res.status(201).json({
-      calculated: rows,
-      issues: missing.map((r) => ({
-        code: 'RATE_NOT_FOUND', severity: 'WARN',
-        message: `${r.cost_type}: 단가가 등록되지 않은 항목이 ${r.missing_rate_count}건 있어 `
-          + '그만큼 금액에서 빠졌습니다.',
-      })),
+    res.status(201).json({ calculated: rows, issues: rateIssues(rows) });
+  } catch (e) { next(e); }
+});
+
+/** §25/§26 한 달치 자동계산. 월대·월급 정산의 기준 단위다. */
+costAdminRouter.post('/sites/:siteId/calculate-month', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const p = z.object({
+      year_month: z.string().regex(/^\d{4}-\d{2}$/, '연월은 YYYY-MM 형식입니다.'),
+    }).safeParse(req.body);
+    if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '연월이 올바르지 않습니다.');
+    const month = `${p.data.year_month}-01`;
+
+    const rows = await withSession(req.actor!, async (c) => {
+      const r = await c.query(
+        'SELECT * FROM private_cost.fn_apply_monthly_cost($1,$2)', [siteId, month]);
+      return r.rows as {
+        cost_type: string; amount: string; missing_rate_count: number; day_count: number;
+      }[];
     });
+    res.status(201).json({ year_month: p.data.year_month, calculated: rows,
+                           issues: rateIssues(rows) });
+  } catch (e) { next(e); }
+});
+
+/** 계산 근거 미리보기 — 저장하지 않는다 (§11, §12 임의 확정 금지) */
+costAdminRouter.get('/sites/:siteId/cost-preview', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const p = z.object({
+      year_month: z.string().regex(/^\d{4}-\d{2}$/),
+    }).safeParse(req.query);
+    if (!p.success) throw badRequest('연월은 YYYY-MM 형식입니다.');
+    const month = `${p.data.year_month}-01`;
+
+    const data = await withSession(req.actor!, async (c) => ({
+      labor: (await c.query(
+        'SELECT * FROM private_cost.fn_calc_labor_cost($1,$2)', [siteId, month])).rows,
+      equipment: (await c.query(
+        'SELECT * FROM private_cost.fn_calc_equipment_cost($1,$2)', [siteId, month])).rows,
+    }));
+    res.json({ year_month: p.data.year_month, ...data });
+  } catch (e) { next(e); }
+});
+
+/**
+ * §26 월 정산방식 — 불가항력 등으로 '일자로 계산하여 마무리' 할 때 쓴다.
+ *   PRORATED (기본) : 월액 ÷ 월 기준일수 × 실투입공수
+ *   FIXED           : 월액 전액. 그 달의 공수 비율로 일자에 배분한다.
+ */
+costAdminRouter.put('/sites/:siteId/settlement', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const item = z.object({
+      target_kind: z.enum(['LABOR', 'EQUIPMENT']),
+      target_name: z.string().min(1).max(50),
+      year_month: z.string().regex(/^\d{4}-\d{2}$/),
+      method: z.enum(['FIXED', 'PRORATED']),
+      reason: z.string().max(200).nullish(),
+    });
+    const p = z.union([item, z.array(item).min(1).max(100)]).safeParse(req.body);
+    if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '정산방식이 올바르지 않습니다.');
+    const items = Array.isArray(p.data) ? p.data : [p.data];
+
+    const rows = await withSession(req.actor!, async (c) => {
+      const out = [];
+      for (const it of items) {
+        const r = await c.query(
+          `INSERT INTO private_cost.monthly_settlement
+             (site_id, target_kind, target_name, year_month, method, reason, decided_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (site_id, target_kind, target_name, year_month)
+             DO UPDATE SET method = EXCLUDED.method, reason = EXCLUDED.reason,
+                           decided_by = EXCLUDED.decided_by
+           RETURNING target_kind, target_name, year_month, method, reason`,
+          [siteId, it.target_kind, it.target_name, `${it.year_month}-01`,
+           it.method, it.reason ?? null, req.actor!.userId]);
+        out.push(r.rows[0]);
+      }
+      return out;
+    });
+    // 정산방식이 바뀌면 그 달 금액이 달라진다. 바로 다시 계산한다.
+    const months = [...new Set(items.map((i) => i.year_month))];
+    await withSession(req.actor!, async (c) => {
+      for (const m of months) {
+        await c.query('SELECT private_cost.fn_apply_monthly_cost($1,$2)', [siteId, `${m}-01`]);
+      }
+    });
+    res.json({ settlements: rows, recalculated_months: months });
   } catch (e) { next(e); }
 });
 

@@ -278,9 +278,9 @@ describe('§25, §26 단가는 본사가 넣고 계산은 결정론적으로 한
   it('본사가 노무 단가를 등록한다', async () => {
     const res = await request(app).post('/api/admin/cost/labor-rates').set(auth(headToken))
       .send([
-        { role_name: '현장관리자', daily_rate: '250000', effective_from: '2026-01-01' },
-        { role_name: '천공기 장비기사', daily_rate: '300000', effective_from: '2026-01-01' },
-        { role_name: '천공기 작업반장', daily_rate: '280000', effective_from: '2026-01-01' },
+        { role_name: '현장관리자', pay_type: 'DAILY', rate: '250000', effective_from: '2026-01-01' },
+        { role_name: '천공기 장비기사', pay_type: 'DAILY', rate: '300000', effective_from: '2026-01-01' },
+        { role_name: '천공기 작업반장', pay_type: 'DAILY', rate: '280000', effective_from: '2026-01-01' },
       ]);
     expect(res.status).toBe(201);
     expect(res.body.labor_rates).toHaveLength(3);
@@ -344,16 +344,16 @@ describe('§25, §26 단가는 본사가 넣고 계산은 결정론적으로 한
         `SELECT calc_detail FROM private_cost.daily_cost
           WHERE site_id=$1 AND cost_date='2026-10-05' AND cost_type='C01'
             AND source='CALCULATED'`, [siteId]);
-      return r.rows[0].calc_detail as { items: { role_name: string; daily_rate: string }[] };
+      return r.rows[0].calc_detail as { items: { role_name: string; rate: string }[] };
     });
-    const byRole = new Map(detail.items.map((i) => [i.role_name, i.daily_rate]));
+    const byRole = new Map(detail.items.map((i) => [i.role_name, i.rate]));
     // §46 단가는 문자열로 남긴다. JSON 숫자로 두면 큰 금액에서 오차가 생긴다.
     expect(byRole.get('천공기 장비기사')).toBe('300000.00');
   });
 
   it('같은 대상·같은 시작일에 단가를 두 개 만들 수 없다 (어느 쪽을 쓸지 모른다)', async () => {
     const res = await request(app).post('/api/admin/cost/labor-rates').set(auth(headToken))
-      .send({ role_name: '현장관리자', daily_rate: '999999', effective_from: '2026-01-01' });
+      .send({ role_name: '현장관리자', pay_type: 'DAILY', rate: '999999', effective_from: '2026-01-01' });
     expect(res.status).toBe(201);          // 덮어쓰기(UPSERT)로 처리한다
     const n = await withSession(HO, async (c) => {
       const r = await c.query(
@@ -364,7 +364,7 @@ describe('§25, §26 단가는 본사가 넣고 계산은 결정론적으로 한
     expect(n).toBe(1);
     // 되돌린다
     await request(app).post('/api/admin/cost/labor-rates').set(auth(headToken))
-      .send({ role_name: '현장관리자', daily_rate: '250000', effective_from: '2026-01-01' });
+      .send({ role_name: '현장관리자', pay_type: 'DAILY', rate: '250000', effective_from: '2026-01-01' });
   });
 });
 
@@ -451,7 +451,7 @@ describe('§44 현장관리자는 비용을 입력하지만 원가를 보지 못
   it('본사 전용 API 경로에 들어갈 수 없다', async () => {
     const calls = [
       request(app).post('/api/admin/cost/labor-rates').set(auth(fieldToken))
-        .send({ role_name: 'X', daily_rate: '1', effective_from: '2026-01-01' }),
+        .send({ role_name: 'X', rate: '1', effective_from: '2026-01-01' }),
       request(app).get(`/api/admin/cost/sites/${siteId}/cost-summary`).set(auth(fieldToken)),
       request(app).post(`/api/admin/cost/daily-work/${dailyWorkId}/calculate-cost`)
         .set(auth(fieldToken)),

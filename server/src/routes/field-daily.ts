@@ -226,7 +226,10 @@ const saveInput = rangeInput.extend({
   labor_same_as_default: z.boolean().default(true),
   labor_changes: z.array(z.object({
     role_name: z.string().min(1).max(50),
-    headcount: amount('인원'),
+    headcount: amount('인원').optional(),
+    /** 출력일보 공수. 1=하루, 0.5=반일, 0=미출력. 안 보내면 기본값(보통 1일)을 쓴다. */
+    work_days: amount('공수').optional(),
+    absence_reason: z.string().max(100).nullish(),
     note: z.string().max(200).optional(),
   })).max(50).nullish(),
 
@@ -234,7 +237,10 @@ const saveInput = rangeInput.extend({
   equipment_same_as_default: z.boolean().default(true),
   equipment_changes: z.array(z.object({
     equipment_name: z.string().min(1).max(50),
-    quantity: amount('수량'),
+    quantity: amount('수량').optional(),
+    /** 장비가동일보 가동일수. 1=하루, 0.5=반일, 0=미가동(대기·기상·불가항력). */
+    operating_days: amount('가동일수').optional(),
+    idle_reason: z.string().max(100).nullish(),
     charge_type: z.enum(['DAILY', 'MONTHLY', 'OTHER']).optional(),
     note: z.string().max(200).optional(),
   })).max(50).nullish(),
@@ -344,12 +350,26 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
         await c.query('DELETE FROM core.daily_labor WHERE daily_work_id=$1', [workId]);
       } else {
         for (const l of d.labor_changes ?? []) {
+          // 인원만 바꾸는 날도 있고 공수만 바꾸는 날도 있다 (반일 출력).
+          // 안 보낸 값은 기본설정에서 가져오고, 이미 적어둔 값이 있으면 그것을 지킨다.
           await c.query(
-            `INSERT INTO core.daily_labor (daily_work_id, role_name, headcount, note)
-             VALUES ($1,$2,$3,$4)
+            `INSERT INTO core.daily_labor
+               (daily_work_id, role_name, headcount, work_days, absence_reason, note)
+             SELECT $1, $2,
+                    COALESCE($3::numeric, sl.headcount, 1),
+                    COALESCE($4::numeric, sl.default_work_days, 1),
+                    $5, $6
+               FROM (SELECT 1) x
+               LEFT JOIN core.site_default_labor sl
+                      ON sl.site_id = (SELECT w.site_id FROM core.daily_work w WHERE w.id = $1)
+                     AND sl.role_name = $2 AND sl.is_active
              ON CONFLICT (daily_work_id, role_name) DO UPDATE
-               SET headcount = EXCLUDED.headcount, note = EXCLUDED.note`,
-            [workId, l.role_name, l.headcount, l.note ?? null]);
+               SET headcount      = COALESCE($3::numeric, core.daily_labor.headcount),
+                   work_days      = COALESCE($4::numeric, core.daily_labor.work_days),
+                   absence_reason = COALESCE($5, core.daily_labor.absence_reason),
+                   note           = COALESCE($6, core.daily_labor.note)`,
+            [workId, l.role_name, l.headcount ?? null, l.work_days ?? null,
+             l.absence_reason ?? null, l.note ?? null]);
         }
       }
 
@@ -360,12 +380,24 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
         for (const e of d.equipment_changes ?? []) {
           await c.query(
             `INSERT INTO core.daily_equipment
-               (daily_work_id, equipment_name, quantity, charge_type, note)
-             VALUES ($1,$2,$3,$4,$5)
+               (daily_work_id, equipment_name, quantity, operating_days,
+                charge_type, idle_reason, note)
+             SELECT $1, $2,
+                    COALESCE($3::numeric, se.quantity, 1),
+                    COALESCE($4::numeric, se.default_operating_days, 1),
+                    $5, $6, $7
+               FROM (SELECT 1) x
+               LEFT JOIN core.site_default_equipment se
+                      ON se.site_id = (SELECT w.site_id FROM core.daily_work w WHERE w.id = $1)
+                     AND se.equipment_name = $2 AND se.is_active
              ON CONFLICT (daily_work_id, equipment_name) DO UPDATE
-               SET quantity = EXCLUDED.quantity, charge_type = EXCLUDED.charge_type,
-                   note = EXCLUDED.note`,
-            [workId, e.equipment_name, e.quantity, e.charge_type ?? null, e.note ?? null]);
+               SET quantity       = COALESCE($3::numeric, core.daily_equipment.quantity),
+                   operating_days = COALESCE($4::numeric, core.daily_equipment.operating_days),
+                   charge_type    = COALESCE($5, core.daily_equipment.charge_type),
+                   idle_reason    = COALESCE($6, core.daily_equipment.idle_reason),
+                   note           = COALESCE($7, core.daily_equipment.note)`,
+            [workId, e.equipment_name, e.quantity ?? null, e.operating_days ?? null,
+             e.charge_type ?? null, e.idle_reason ?? null, e.note ?? null]);
         }
       }
 
@@ -413,10 +445,12 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
         layer_summary: layer.rows,
         ready_mix: readyMix,
         labor: (await c.query(
-          `SELECT role_name, headcount, is_override FROM core.v_daily_labor_effective
+          `SELECT role_name, headcount, work_days, man_days, absence_reason, is_override
+             FROM core.v_daily_labor_effective
             WHERE daily_work_id=$1 ORDER BY sort_order, role_name`, [workId])).rows,
         equipment: (await c.query(
-          `SELECT equipment_name, quantity, charge_type, is_override
+          `SELECT equipment_name, quantity, operating_days, unit_days, idle_reason,
+                  charge_type, is_override
              FROM core.v_daily_equipment_effective
             WHERE daily_work_id=$1 ORDER BY sort_order, equipment_name`, [workId])).rows,
         progress,
@@ -490,14 +524,90 @@ fieldRouter.get('/sites/:siteId/defaults', async (req, res, next) => {
     const siteId = uuid.parse(req.params.siteId);
     const data = await withSession(req.actor!, async (c) => {
       const labor = await c.query(
-        `SELECT role_name, headcount, note FROM core.site_default_labor
+        `SELECT role_name, headcount, default_work_days, note FROM core.site_default_labor
           WHERE site_id=$1 AND is_active ORDER BY sort_order, role_name`, [siteId]);
       const equipment = await c.query(
-        `SELECT equipment_name, charge_type, quantity, note FROM core.site_default_equipment
+        `SELECT equipment_name, charge_type, quantity, default_operating_days, note
+           FROM core.site_default_equipment
           WHERE site_id=$1 AND is_active ORDER BY sort_order, equipment_name`, [siteId]);
       return { labor: labor.rows, equipment: equipment.rows };
     });
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+/* ================================================ 출력일보 / 장비가동일보 (§26) */
+/*
+ * 금액은 없다. 공수와 가동일수만 있다.
+ * 현금으로 지급하지 않아도 1일 / 0.5일 은 반드시 남아야 하고,
+ * 투입비는 본사가 이 값에 단가를 곱해서 계산한다 (§25, §26, §29).
+ * PHASE 9 작업일보가 이 API 를 그대로 재사용한다 (§1-7).
+ */
+const logRange = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+
+function monthRange(q: { from?: string; to?: string }): { from: string; to: string } {
+  const to = q.to ?? new Date().toISOString().slice(0, 10);
+  return { from: q.from ?? `${to.slice(0, 8)}01`, to };
+}
+
+fieldRouter.get('/sites/:siteId/labor-log', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const q = logRange.safeParse(req.query);
+    if (!q.success) throw badRequest('기간이 올바르지 않습니다.');
+    const { from, to } = monthRange(q.data);
+
+    const data = await withSession(req.actor!, async (c) => {
+      const days = await c.query(
+        `SELECT work_date, role_name, headcount, work_days, man_days,
+                absence_reason, is_override
+           FROM core.v_labor_log
+          WHERE site_id=$1 AND work_date BETWEEN $2 AND $3
+          ORDER BY work_date, sort_order, role_name`, [siteId, from, to]);
+      const byRole = await c.query(
+        `SELECT role_name, sum(man_days)::text AS man_days,
+                count(*) FILTER (WHERE work_days > 0)::int AS work_day_count
+           FROM core.v_labor_log
+          WHERE site_id=$1 AND work_date BETWEEN $2 AND $3
+          GROUP BY role_name, sort_order ORDER BY sort_order, role_name`, [siteId, from, to]);
+      const total = await c.query(
+        `SELECT COALESCE(sum(man_days), 0)::text AS man_days
+           FROM core.v_labor_log
+          WHERE site_id=$1 AND work_date BETWEEN $2 AND $3`, [siteId, from, to]);
+      return { days: days.rows, by_role: byRole.rows, total_man_days: total.rows[0]!.man_days };
+    });
+    res.json({ from, to, ...data });
+  } catch (e) { next(e); }
+});
+
+fieldRouter.get('/sites/:siteId/equipment-log', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const q = logRange.safeParse(req.query);
+    if (!q.success) throw badRequest('기간이 올바르지 않습니다.');
+    const { from, to } = monthRange(q.data);
+
+    const data = await withSession(req.actor!, async (c) => {
+      const days = await c.query(
+        `SELECT work_date, equipment_name, charge_type, quantity,
+                operating_days, unit_days, idle_reason, is_override
+           FROM core.v_equipment_log
+          WHERE site_id=$1 AND work_date BETWEEN $2 AND $3
+          ORDER BY work_date, sort_order, equipment_name`, [siteId, from, to]);
+      const byEquip = await c.query(
+        `SELECT equipment_name, charge_type, sum(unit_days)::text AS unit_days,
+                count(*) FILTER (WHERE operating_days > 0)::int AS operating_day_count,
+                count(*) FILTER (WHERE operating_days = 0)::int AS idle_day_count
+           FROM core.v_equipment_log
+          WHERE site_id=$1 AND work_date BETWEEN $2 AND $3
+          GROUP BY equipment_name, charge_type, sort_order
+          ORDER BY sort_order, equipment_name`, [siteId, from, to]);
+      return { days: days.rows, by_equipment: byEquip.rows };
+    });
+    res.json({ from, to, ...data });
   } catch (e) { next(e); }
 });
 

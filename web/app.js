@@ -540,39 +540,99 @@ function renderDelayOptions() {
   });
 }
 
-/** §21/§22 '아니오' 일 때만 나온다. 바뀐 것만 적는다. */
+/*
+ * §21/§22 '아니오' 일 때만 나온다. 바뀐 것만 적는다.
+ *
+ * 공수(출력일보) / 가동일수(장비가동일보) 를 여기서 받는다.
+ * 현금으로 지급하지 않아도 1일 / 0.5일 은 반드시 남아야 하고,
+ * 투입비는 본사가 이 값에 단가를 곱해서 계산한다 (§25, §26).
+ *
+ * 기본은 [1일] 이 눌려 있다. 반일이거나 안 나온 날만 손댄다 (§1-6).
+ */
+const DAY_CHOICES = [
+  { v: '1', label: '1일' },
+  { v: '0.5', label: '반일' },
+  { v: '0', label: '안나옴' },
+];
+
 function renderDefaultEditor(kind) {
   const isLabor = kind === 'labor';
   const box = $(isLabor ? '#laborDetail' : '#equipDetail');
   if (!box) return;
   const list = isLabor ? state.defaults.labor : state.defaults.equipment;
-  const changes = isLabor ? state.laborChanges : state.equipChanges;
+  const arr = isLabor ? state.laborChanges : state.equipChanges;
   const keyOf = (x) => (isLabor ? x.role_name : x.equipment_name);
-  const valOf = (x) => (isLabor ? x.headcount : x.quantity);
-  const changed = new Map(changes.map((c) => [keyOf(c), isLabor ? c.headcount : c.quantity]));
+  const countOf = (x) => (isLabor ? x.headcount : x.quantity);
+  const defDays = (x) => (isLabor ? x.default_work_days : x.default_operating_days) ?? '1';
+  const daysField = isLabor ? 'work_days' : 'operating_days';
+  const countField = isLabor ? 'headcount' : 'quantity';
+  const reasonField = isLabor ? 'absence_reason' : 'idle_reason';
+  const entryFor = (key) => arr.find((c) => keyOf(c) === key);
 
   if (list.length === 0) {
     box.innerHTML = '<p class="muted" style="font-size:17px">기본설정이 없습니다. 본사에 등록을 요청하십시오.</p>';
     return;
   }
+
+  // 화면에 보이는 값 = 적어둔 값이 있으면 그것, 없으면 기본값
+  const shownDays = (x) => entryFor(keyOf(x))?.[daysField] ?? String(Number(defDays(x)));
+
   box.innerHTML = `
-    <p class="muted" style="font-size:17px;margin-top:12px">바뀐 것만 적으십시오.</p>
-    <div class="rowlist">
-      ${list.map((x) => `
-        <div class="row"><span class="no">${keyOf(x)}</span>
-          <input inputmode="decimal" data-key="${keyOf(x)}"
-                 placeholder="${valOf(x)}" value="${changed.get(keyOf(x)) ?? ''}"></div>`).join('')}
+    <p class="muted" style="font-size:17px;margin-top:12px">
+      바뀐 것만 손대십시오. ${isLabor ? '출력일보' : '장비가동일보'}에 그대로 들어갑니다.</p>
+    <div class="daylist">
+      ${list.map((x) => {
+        const key = keyOf(x);
+        const e = entryFor(key);
+        const days = shownDays(x);
+        return `
+        <div class="dayrow">
+          <div class="dayhead">
+            <span class="no">${key}</span>
+            <input class="cnt" inputmode="decimal" data-count="${key}"
+                   placeholder="${countOf(x)}" value="${e?.[countField] ?? ''}"
+                   aria-label="${isLabor ? '인원' : '대수'}">
+          </div>
+          <div class="daypick">
+            ${DAY_CHOICES.map((c) => `<button data-days="${c.v}" data-key="${key}"
+               aria-pressed="${Number(days) === Number(c.v)}">${c.label}</button>`).join('')}
+          </div>
+          ${Number(days) !== 1 ? `
+          <input class="reason" data-reason="${key}" value="${e?.[reasonField] ?? ''}"
+                 placeholder="사유 (정산 근거로 남습니다)">` : ''}
+        </div>`;
+      }).join('')}
     </div>`;
-  box.querySelectorAll('input[data-key]').forEach((i) => {
-    i.onchange = () => {
-      const key = i.dataset.key;
-      const v = i.value.trim();
-      const arr = isLabor ? state.laborChanges : state.equipChanges;
-      const idx = arr.findIndex((c) => keyOf(c) === key);
-      if (v === '') { if (idx >= 0) arr.splice(idx, 1); return; }
-      const entry = isLabor ? { role_name: key, headcount: v } : { equipment_name: key, quantity: v };
-      if (idx >= 0) arr[idx] = entry; else arr.push(entry);
+
+  /** 변경행을 만들거나 지운다. 기본과 같아지면 행 자체를 없앤다 (§1-6). */
+  const upsert = (key, patch) => {
+    const idx = arr.findIndex((c) => keyOf(c) === key);
+    const base = idx >= 0 ? arr[idx] : (isLabor ? { role_name: key } : { equipment_name: key });
+    const next = { ...base, ...patch };
+    for (const f of [countField, daysField, reasonField]) {
+      if (next[f] === '' || next[f] === undefined || next[f] === null) delete next[f];
+    }
+    const keys = Object.keys(next).filter((k) => k !== 'role_name' && k !== 'equipment_name');
+    if (keys.length === 0) { if (idx >= 0) arr.splice(idx, 1); return; }
+    if (idx >= 0) arr[idx] = next; else arr.push(next);
+  };
+
+  box.querySelectorAll('input[data-count]').forEach((i) => {
+    i.onchange = () => upsert(i.dataset.count, { [countField]: i.value.trim() });
+  });
+  box.querySelectorAll('button[data-days]').forEach((b) => {
+    b.onclick = () => {
+      const key = b.dataset.key;
+      const x = list.find((y) => keyOf(y) === key);
+      // 기본값과 같은 것을 고르면 그 항목은 '변경 없음' 으로 되돌린다
+      const same = Number(b.dataset.days) === Number(defDays(x));
+      upsert(key, { [daysField]: same ? '' : b.dataset.days,
+                    ...(Number(b.dataset.days) === 1 ? { [reasonField]: '' } : {}) });
+      renderDefaultEditor(kind);
     };
+  });
+  box.querySelectorAll('input[data-reason]').forEach((i) => {
+    i.onchange = () => upsert(i.dataset.reason, { [reasonField]: i.value.trim() });
   });
 }
 
