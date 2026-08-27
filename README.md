@@ -19,6 +19,17 @@ RF CIP(겹침 CIP) 전문건설 현장의 **천공번호 기반 통합 현장관
 | PHASE 8 | 비용 + 사진증빙 + 본사전용 보안 | 대기 |
 | PHASE 9~15 | — | 대기 |
 
+## 현장 시험사용
+
+실제 현장관리자에게 써보게 하려면 [`docs/TRIAL_GUIDE.md`](docs/TRIAL_GUIDE.md) 를 보십시오.
+
+```bash
+docker compose up          # PostgreSQL + 서버 + 시험현장 한 번에
+```
+
+서버가 뜨면 휴대폰으로 접속할 주소와 QR 코드가 화면에 표시됩니다.
+시험 계정: `trial` / `test1234!`
+
 ## 로컬 실행
 
 ```bash
@@ -36,6 +47,9 @@ npm --prefix server run test
 
 # 5) 개발 서버
 npm --prefix server run dev
+
+# 시험사용 (초기화 + 시험현장 + 서버)
+npm --prefix server run trial
 ```
 
 접속: 현장 모바일 화면은 <http://localhost:3000/app/> 입니다.

@@ -1,0 +1,45 @@
+# 시험사용용 한 번에 띄우기
+#
+#   docker compose up
+#
+# 이것만 하면 PostgreSQL 과 서버가 함께 뜨고, 테스트 현장까지 만들어집니다.
+# 휴대폰에서는 PC 와 같은 Wi-Fi 에 접속한 뒤 화면에 표시되는 주소로 들어가면 됩니다.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: rfcip-local
+      POSTGRES_DB: postgres
+      TZ: Asia/Seoul
+    ports: ['5432:5432']
+    volumes: ['rfcip-db:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    image: node:22-alpine
+    working_dir: /app
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      ADMIN_DATABASE_URL: postgres://postgres:rfcip-local@db:5432/postgres
+      DATABASE_NAME: rfcip
+      APP_DB_USER: rfcip_app
+      APP_DB_PASSWORD: rfcip-local-app
+      DATABASE_URL: postgres://rfcip_app:rfcip-local-app@db:5432/rfcip
+      JWT_SECRET: local-trial-secret-key-at-least-32-characters
+      PORT: '3000'
+      STORAGE_BACKEND: LOCAL
+      STORAGE_LOCAL_ROOT: ../storage
+      TZ: Asia/Seoul
+    ports: ['3000:3000']
+    volumes: ['.:/app']
+    command: >
+      sh -c "cd server && npm install --no-audit --no-fund &&
+             npm run db:reset && npm run trial:seed && npm run dev"
+
+volumes:
+  rfcip-db:
