@@ -34,6 +34,8 @@ const state = {
   laborSame: null, laborChanges: [],
   equipSame: null, equipChanges: [],
   readyMix: null,
+  register: null,      // §34 천공조서
+  registerStatus: '',
   report: null,        // §33 작업일보
   cost: null,          // §27 비용 입력 중인 내용
   costTypes: [],
@@ -281,7 +283,7 @@ async function openMain() {
     </div>` : ''}
 
     <button class="primary" id="goInput">${submitted ? '오늘 작업 다시 입력' : '오늘 작업 입력'}</button>
-    <button class="later" disabled>천공현황 / 도면 · 준비중</button>
+    <button id="goRegister">천공조서 / 천공일지</button>
     <button id="goCost">비용 · 증빙</button>
     <button class="later" disabled>특이사항 · 준비중</button>
     <button id="goReport">오늘 보고서</button>
@@ -299,6 +301,7 @@ async function openMain() {
     }
   };
   $('#goCost').onclick = openCost;
+  $('#goRegister').onclick = () => openRegister();
   // openReport(date) 라서 그대로 넘기면 클릭 이벤트가 날짜 자리에 들어간다
   $('#goReport').onclick = () => openReport();
   $('#switchSite').onclick = () => {
@@ -713,6 +716,109 @@ async function renderGroundOptions() {
   });
 }
 
+/* --------------------------------- 천공조서 / 천공일지 (§34, 사용자 확인) */
+/*
+ * "천공일지는 천공조서와 거의 동일하다."
+ * 그래서 수량산출서 천공조서와 같은 칸으로 낸다.
+ *   PILE NO │ 지층별 공당 │ 합계 │ 실제 │ 상태
+ * 지층 칸은 현장이 정한 지층으로 만든다. 시스템이 정하지 않는다 (§7).
+ *
+ * 휴대폰이라 표가 옆으로 길어진다. 가로로만 스크롤되게 하고 세로는 그대로 둔다.
+ */
+const REG_FILTERS = [
+  { v: '', label: '전체' },
+  { v: 'COMPLETED', label: '완료' },
+  { v: 'NOT_STARTED', label: '미시공' },
+];
+
+async function openRegister(status) {
+  const st = status ?? state.registerStatus ?? '';
+  let data;
+  try {
+    const got = await fetchWithCache(`register.${st}`,
+      `/reports/sites/${state.siteId}/drilling-register?limit=500${st ? `&status=${st}` : ''}`);
+    data = got.data; state.stale = got.stale;
+  } catch (e) { toast(e.message); return; }
+  state.register = data;
+  state.registerStatus = st;
+  renderRegister();
+}
+
+function renderRegister() {
+  const d = state.register;
+  const gts = d.ground_types;
+  const layerOf = (r, code) =>
+    (r.layers ?? []).find((l) => l.ground_type_code === code)?.per_hole;
+
+  app.innerHTML = `
+    <header class="site">
+      <h1>천공조서</h1>
+      <div class="date">${state.today.site.site_name} · ${d.total_count}공</div>
+    </header>
+
+    ${state.stale ? '<div class="notice warn">통신이 안 되어 마지막으로 받은 내용을 보여줍니다.</div>' : ''}
+    ${d.issues.map((i) => `<div class="notice error">${i.message}</div>`).join('')}
+
+    <div class="card">
+      <div class="picker" style="max-height:none">
+        ${REG_FILTERS.map((f) => `<button data-status="${f.v}"
+          aria-pressed="${state.registerStatus === f.v}">${f.label}</button>`).join('')}
+      </div>
+    </div>
+
+    ${d.totals.map((t) => `
+    <div class="card">
+      <h2>${t.hole_type_name} 합계</h2>
+      <table class="summary">
+        <tr><td>공수</td><td class="num">${t.completed_count} / ${t.hole_count}공</td></tr>
+        ${t.layers.map((l) =>
+          `<tr><td>${l.ground_type_name}</td><td class="num">${num(l.planned_length)} m</td></tr>`).join('')}
+        <tr><td>계획 합계</td><td class="num">${num(t.planned_length)} m</td></tr>
+        <tr><td>실적 합계</td><td class="num">${num(t.actual_length)} m</td></tr>
+      </table>
+    </div>`).join('')}
+
+    <div class="card">
+      <h2>천공조서</h2>
+      <div class="tablewrap">
+        <table class="register">
+          <thead>
+            <tr>
+              <th>PILE NO</th>
+              ${gts.map((g) => `<th>${g.name}</th>`).join('')}
+              <th>합계</th><th>실제</th><th>상태</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${d.rows.map((r) => `
+            <tr data-hole="${r.hole_no}">
+              <th>${r.hole_no}</th>
+              ${gts.map((g) => `<td>${layerOf(r, g.code) ? num(layerOf(r, g.code)) : '-'}</td>`).join('')}
+              <td class="${r.has_ground_profile && Number(r.layer_sum) !== Number(r.design_depth_total)
+                ? 'bad' : ''}">${num(r.design_depth_total)}</td>
+              <td>${r.actual_depth_total ? num(r.actual_depth_total) : '-'}</td>
+              <td>${r.status === 'COMPLETED' ? '완료'
+                : r.status === 'NOT_STARTED' ? '미시공' : r.status}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <p class="muted" style="font-size:17px">줄을 누르면 그 공의 천공일지가 나옵니다.</p>
+      ${d.count < d.total_count
+        ? `<p class="muted" style="font-size:17px">${d.count} / ${d.total_count}공 표시</p>` : ''}
+    </div>
+
+    <button class="ghost" id="back">돌아가기</button>`;
+
+  app.querySelectorAll('button[data-status]').forEach((b) => {
+    b.onclick = () => openRegister(b.dataset.status);
+  });
+  app.querySelectorAll('tr[data-hole]').forEach((tr) => {
+    tr.onclick = () => openHoleLog(tr.dataset.hole, 'register');
+  });
+  $('#back').onclick = openMain;
+}
+
 /* ------------------------------------------- §33 작업일보 (PHASE 9) */
 /*
  * 현장관리자가 따로 쓰는 것이 없다. 이미 받아 둔 값을 모아 보여줄 뿐이다 (§1-7).
@@ -857,7 +963,7 @@ function renderReport() {
 }
 
 /** §34 천공일지 */
-async function openHoleLog(holeNo) {
+async function openHoleLog(holeNo, from = 'report') {
   let h;
   try {
     h = await api(`/reports/sites/${state.siteId}/holes/${encodeURIComponent(holeNo)}/log`);
@@ -880,13 +986,16 @@ async function openHoleLog(holeNo) {
       </table>
     </div>
 
-    ${h.planned_layers.length ? `
+    ${h.layers.length ? `
     <div class="card">
-      <h2>계획 지층</h2>
+      <h2>지층별 공당 (천공조서)</h2>
       <table class="summary">
-        ${h.planned_layers.map((l) =>
-          `<tr><td>${l.ground_type_name}</td><td class="num">${num(l.planned_length)} m</td></tr>`).join('')}
+        ${h.layers.map((l) =>
+          `<tr><td>${l.ground_type_name}</td><td class="num">${num(l.per_hole)} m</td></tr>`).join('')}
+        <tr><td><b>지층 합계</b></td><td class="num">${num(h.layer_sum)} m</td></tr>
       </table>
+      ${h.layer_sum_matches ? '' :
+        `<div class="notice error">지층 합계(${num(h.layer_sum)}m)가 계획심도(${num(h.design_depth_total)}m)와 다릅니다. 조서를 확인해 주십시오.</div>`}
     </div>` : ''}
 
     ${h.ready_mix ? `
@@ -902,8 +1011,8 @@ async function openHoleLog(holeNo) {
       </table>
     </div>` : ''}
 
-    <button class="ghost" id="backReport">작업일보로</button>`;
-  $('#backReport').onclick = () => renderReport();
+    <button class="ghost" id="backReport">${from === 'register' ? '천공조서로' : '작업일보로'}</button>`;
+  $('#backReport').onclick = () => (from === 'register' ? renderRegister() : renderReport());
 }
 
 /* ------------------------------------------------ §27 비용 · 증빙 (PHASE 8) */

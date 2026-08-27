@@ -90,6 +90,72 @@ reportRouter.get('/sites/:siteId/holes/:holeNo/log', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/**
+ * 천공조서 — 천공일지의 목록 형태 (사용자 확인: "천공조서와 거의 동일")
+ *
+ * 조서 원본과 같은 칸 구성으로 낸다.
+ *   PILE NO │ 지층별 공당·소계 │ 합계 │ (+ 실제심도·시공일·상태)
+ *
+ * 지층 칸은 현장마다 다르므로 목록을 따로 실어 준다. 시스템이 지층을 정하지 않는다 (§7).
+ */
+reportRouter.get('/sites/:siteId/drilling-register', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const q = z.object({
+      hole_type: z.string().max(30).optional(),
+      status: z.enum(['NOT_STARTED', 'COMPLETED', 'ON_HOLD', 'CHANGED', 'NEEDS_CHECK']).optional(),
+      limit: z.coerce.number().int().min(1).max(2000).default(1000),
+      offset: z.coerce.number().int().min(0).default(0),
+    }).safeParse(req.query);
+    if (!q.success) throw badRequest('조회 조건이 올바르지 않습니다.');
+
+    const data = await withSession(req.actor!, async (c) => {
+      const groundTypes = (await c.query(
+        `SELECT code, name, status FROM core.ground_type
+          WHERE site_id=$1 ORDER BY sort_order, name`, [siteId])).rows;
+
+      const params: unknown[] = [siteId];
+      let where = '';
+      if (q.data.hole_type) { params.push(q.data.hole_type); where += ` AND hole_type_code = $${params.length}`; }
+      if (q.data.status)    { params.push(q.data.status);    where += ` AND status = $${params.length}`; }
+      params.push(q.data.limit, q.data.offset);
+
+      const rows = (await c.query(
+        `SELECT * FROM core.fn_drilling_register($1)
+          WHERE true ${where}
+          ORDER BY sort_key
+          LIMIT $${params.length - 1} OFFSET $${params.length}`, params)).rows;
+
+      const total = (await c.query(
+        'SELECT count(*)::int AS n FROM core.fn_drilling_register($1)', [siteId])).rows[0]!.n;
+
+      const totals = (await c.query(
+        'SELECT * FROM core.fn_drilling_register_total($1)', [siteId])).rows;
+
+      // 조서 자체가 어긋나 있으면 알려준다 (지층합계 ≠ 계획심도)
+      // 지반조건이 아직 배정되지 않은 공은 여기서 다루지 않는다. 그건 별도 검증 항목이다.
+      const mismatched = rows.filter((r: {
+        layer_sum: string; design_depth_total: string | null; has_ground_profile: boolean;
+      }) => r.has_ground_profile && r.design_depth_total !== null
+        && Math.abs(Number(r.layer_sum) - Number(r.design_depth_total)) > 0.001);
+
+      return {
+        ground_types: groundTypes,
+        rows,
+        totals,
+        count: rows.length,
+        total_count: total,
+        issues: mismatched.length === 0 ? [] : [{
+          code: 'LAYER_SUM_MISMATCH', severity: 'ERROR', target: '천공조서',
+          message: `지층 합계가 계획심도와 다른 천공이 ${mismatched.length}공 있습니다: `
+            + mismatched.slice(0, 10).map((r: { hole_no: string }) => r.hole_no).join(', '),
+        }],
+      };
+    });
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
 /** §35 작업도면 완료 = 천공일지 완료 = 수량산출 실적 */
 reportRouter.get('/sites/:siteId/progress-consistency', async (req, res, next) => {
   try {

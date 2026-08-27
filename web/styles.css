@@ -156,3 +156,17 @@ label.field input, label.field textarea {
   width: 100%; min-height: 52px; font-size: 18px; font-family: inherit; margin-top: 10px;
   border: 1px solid var(--line); border-radius: 10px; padding: 0 12px;
 }
+
+/* 천공조서 — 휴대폰에서는 옆으로만 스크롤한다 */
+.tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; }
+table.register { border-collapse: collapse; font-size: 17px; white-space: nowrap; min-width: 100%; }
+table.register th, table.register td {
+  padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: right;
+}
+table.register thead th {
+  position: sticky; top: 0; background: var(--card);
+  font-size: 16px; color: var(--muted); font-weight: 700; border-bottom: 2px solid var(--line);
+}
+table.register tbody th { text-align: left; font-weight: 700; }
+table.register tbody tr:active { background: #dbe7fb; }
+table.register td.bad { color: var(--danger); font-weight: 700; }

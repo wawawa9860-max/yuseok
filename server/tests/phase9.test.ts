@@ -360,3 +360,117 @@ describe('§29 작업일보·천공일지에는 금액이 없다', () => {
     expect(res.status).toBe(403);
   });
 });
+
+/* ==================================== 천공조서 형식 (사용자 확인 2026-08-27) */
+describe('§34 천공일지는 천공조서와 같은 칸 구성이다', () => {
+  it('★ 천공일지에 지층별 공당·소계와 합계가 있다', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/holes/R-003/log`).set(auth(fieldToken));
+    expect(res.status).toBe(200);
+    // 조서 원본의 칸: 토사 공당/소계, 풍화암 공당/소계, 합계
+    expect(res.body.layers.map((l: { ground_type_name: string }) => l.ground_type_name))
+      .toEqual(['토사', '풍화암']);
+    expect(res.body.layers[0].per_hole).toBe('14.000');
+    expect(res.body.layers[0].subtotal).toBe('14.000');
+    expect(res.body.layer_sum).toBe('20.000');
+    expect(res.body.design_depth_total).toBe('20.000');
+  });
+
+  it('★ 지층합계 = 계획심도 를 일지가 직접 확인해 준다', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/holes/R-003/log`).set(auth(fieldToken));
+    expect(res.body.layer_sum_matches).toBe(true);
+  });
+
+  it('★ 조서가 어긋나 있으면 일지가 그 사실을 드러낸다 (음성 검증)', async () => {
+    // 계획심도만 몰래 바꾼다. 지층 합계는 그대로 20 이다.
+    await withSession(HO, async (c) => {
+      await c.query(
+        `UPDATE core.hole_master SET design_depth_total=25
+          WHERE site_id=$1 AND hole_no='R-020'`, [siteId]);
+    });
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/holes/R-020/log`).set(auth(fieldToken));
+    expect(res.body.layer_sum).toBe('20.000');
+    expect(res.body.design_depth_total).toBe('25.000');
+    expect(res.body.layer_sum_matches).toBe(false);   // 숨기지 않는다
+
+    const reg = await request(app)
+      .get(`/api/reports/sites/${siteId}/drilling-register`).set(auth(fieldToken));
+    expect(reg.body.issues[0].code).toBe('LAYER_SUM_MISMATCH');
+    expect(reg.body.issues[0].message).toContain('R-020');
+
+    await withSession(HO, async (c) => {
+      await c.query(
+        `UPDATE core.hole_master SET design_depth_total=20
+          WHERE site_id=$1 AND hole_no='R-020'`, [siteId]);
+    });
+  });
+
+  it('천공조서 목록이 도면 순서로 나온다', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/drilling-register?limit=5`).set(auth(fieldToken));
+    expect(res.status).toBe(200);
+    expect(res.body.rows.map((r: { hole_no: string }) => r.hole_no))
+      .toEqual(['1-1', '1-2', 'R-001', 'R-002', 'R-003']);
+    expect(res.body.issues).toEqual([]);
+  });
+
+  it('★ 지층 칸 목록을 따로 준다 (지층을 시스템이 정하지 않는다 §7)', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/drilling-register?limit=1`).set(auth(fieldToken));
+    expect(res.body.ground_types.map((g: { code: string }) => g.code)).toEqual(['G01', 'G02']);
+    expect(res.body.ground_types.map((g: { name: string }) => g.name)).toEqual(['토사', '풍화암']);
+  });
+
+  it('★ 합계행이 조서 마지막 줄과 같다 (공수 · 지층별 · 합계)', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/drilling-register`).set(auth(fieldToken));
+    const hpile = res.body.totals.find(
+      (t: { hole_type_code: string }) => t.hole_type_code === 'HPILE');
+    expect(hpile.hole_count).toBe(42);          // R-001~R-040 + 1-1, 1-2
+    expect(hpile.completed_count).toBe(5);
+    // 40공 × 20m + 2공 × 15m = 830
+    expect(Number(hpile.planned_length)).toBe(830);
+    const byType = new Map(hpile.layers.map(
+      (l: { ground_type_name: string; planned_length: string }) =>
+        [l.ground_type_name, Number(l.planned_length)]));
+    expect(byType.get('토사')).toBe(560);        // 14 × 40 (1-1,1-2 는 지반조건 없음)
+    expect(byType.get('풍화암')).toBe(240);      // 6 × 40
+  });
+
+  it('실적(실제심도·시공일·상태)이 조서 칸 옆에 함께 나온다', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/drilling-register?status=COMPLETED`)
+      .set(auth(fieldToken));
+    expect(res.body.rows).toHaveLength(5);
+    const r3 = res.body.rows.find((r: { hole_no: string }) => r.hole_no === 'R-003');
+    expect(r3.actual_depth_total).toBe('22.500');
+    expect(r3.depth_diff).toBe('2.500');
+    expect(r3.construction_date).toBe('2026-12-01');
+  });
+
+  it('천공종류로 거를 수 있다', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/drilling-register?hole_type=HPILE`)
+      .set(auth(fieldToken));
+    expect(res.body.total_count).toBe(42);
+    expect(res.body.count).toBe(42);
+  });
+
+  it('★ 조서에도 금액이 없다 (§29)', async () => {
+    const res = await request(app)
+      .get(`/api/reports/sites/${siteId}/drilling-register`).set(auth(fieldToken));
+    const keys = new Set<string>();
+    JSON.stringify(res.body, (k, v) => { keys.add(k); return v; });
+    for (const k of keys) expect(k).not.toMatch(/(^|_)(amount|rate|price|cost|단가|원가)(_|$)/);
+  });
+
+  it('배정 안 된 현장의 조서는 볼 수 없다', async () => {
+    const other = await request(app).post('/api/admin/sites').set(auth(headToken))
+      .send({ site_code: 'PHASE9_REG_OTHER', site_name: '조서 권한 확인용' });
+    const res = await request(app)
+      .get(`/api/reports/sites/${other.body.site.id}/drilling-register`).set(auth(fieldToken));
+    expect(res.status).toBe(403);
+  });
+});
