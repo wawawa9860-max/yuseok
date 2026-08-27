@@ -170,3 +170,9 @@ table.register thead th {
 table.register tbody th { text-align: left; font-weight: 700; }
 table.register tbody tr:active { background: #dbe7fb; }
 table.register td.bad { color: var(--danger); font-weight: 700; }
+
+/* 공정률 (§36) */
+.bignum { font-size: 44px; font-weight: 800; line-height: 1.1; margin: 4px 0 10px; }
+.bignum .unit { font-size: 22px; font-weight: 700; color: var(--muted); margin-left: 4px; }
+.bar { height: 14px; background: var(--line); border-radius: 999px; overflow: hidden; margin-bottom: 12px; }
+.bar span { display: block; height: 100%; background: var(--primary); border-radius: 999px; }

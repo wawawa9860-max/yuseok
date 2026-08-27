@@ -34,6 +34,8 @@ const state = {
   laborSame: null, laborChanges: [],
   equipSame: null, equipChanges: [],
   readyMix: null,
+  progress: null,      // §36 공정률
+  payments: null,      // §37 기성
   register: null,      // §34 천공조서
   registerStatus: '',
   report: null,        // §33 작업일보
@@ -285,6 +287,7 @@ async function openMain() {
     <button class="primary" id="goInput">${submitted ? '오늘 작업 다시 입력' : '오늘 작업 입력'}</button>
     <button id="goRegister">천공조서 / 천공일지</button>
     <button id="goCost">비용 · 증빙</button>
+    <button id="goProgress">공정률 / 기성</button>
     <button class="later" disabled>특이사항 · 준비중</button>
     <button id="goReport">오늘 보고서</button>
     <button class="later" disabled>카카오톡 공유 · 준비중</button>
@@ -302,6 +305,7 @@ async function openMain() {
   };
   $('#goCost').onclick = openCost;
   $('#goRegister').onclick = () => openRegister();
+  $('#goProgress').onclick = openProgress;
   // openReport(date) 라서 그대로 넘기면 클릭 이벤트가 날짜 자리에 들어간다
   $('#goReport').onclick = () => openReport();
   $('#switchSite').onclick = () => {
@@ -714,6 +718,184 @@ async function renderGroundOptions() {
       renderSummary();
     };
   });
+}
+
+/* ------------------------------------------ §36 공정률 / §37 기성 (PHASE 10) */
+/*
+ * 현장관리자도 볼 수 있다. 여기 나오는 금액은 전부 '계약금액' 이다.
+ * 내부 원가(노무비·장비비·단가)는 서버가 애초에 내려주지 않는다 (§29, §44).
+ *
+ * §37 "기성가능액 ≠ 실제 제출 기성" 이므로 화면에서도 두 값을 섞지 않는다.
+ */
+async function openProgress() {
+  let p, pay;
+  try {
+    const [a, b] = await Promise.all([
+      fetchWithCache('progress', `/progress/sites/${state.siteId}/progress`),
+      fetchWithCache('payments', `/progress/sites/${state.siteId}/payments`),
+    ]);
+    p = a.data; pay = b.data; state.stale = a.stale || b.stale;
+  } catch (e) { toast(e.message); return; }
+  state.progress = p; state.payments = pay;
+  renderProgress();
+}
+
+const won = (v) => `${Number(v ?? 0).toLocaleString('ko-KR', { maximumFractionDigits: 0 })}원`;
+const PAY_STATUS = {
+  DRAFT: '작성중', SUBMITTED: '제출', APPROVED: '승인', REJECTED: '반려',
+};
+const BASIS_LABEL = {
+  CONTRACT_QUANTITY: '계약수량 기준',
+  DESIGN_DEPTH: '계약수량이 없어 계획심도로 계산',
+  CONTRACT_AMOUNT: '계약금액 기준',
+  HOLE_CONTRACT_AMOUNT: '계약이 등록되지 않아 천공 계약금액 합계로 계산',
+  NONE: '기준이 되는 값이 없습니다',
+};
+
+function renderProgress() {
+  const p = state.progress;
+  const bar = (rate) => `<div class="bar"><span style="width:${Math.min(100, Number(rate))}%"></span></div>`;
+
+  app.innerHTML = `
+    <header class="site">
+      <h1>공정률 / 기성</h1>
+      <div class="date">${state.today.site.site_name}</div>
+    </header>
+
+    ${state.stale ? '<div class="notice warn">통신이 안 되어 마지막으로 받은 내용을 보여줍니다.</div>' : ''}
+
+    <div class="card">
+      <h2>물량 공정률</h2>
+      <div class="bignum">${num(p.quantity.rate)}<span class="unit">%</span></div>
+      ${bar(p.quantity.rate)}
+      <table class="summary">
+        <tr><td>완료</td><td class="num">${num(p.quantity.completed)} / ${num(p.quantity.total)}</td></tr>
+      </table>
+      <p class="muted" style="font-size:17px">${BASIS_LABEL[p.quantity.basis] ?? p.quantity.basis}</p>
+    </div>
+
+    <div class="card">
+      <h2>금액 공정률</h2>
+      <div class="bignum">${num(p.amount.rate)}<span class="unit">%</span></div>
+      ${bar(p.amount.rate)}
+      <table class="summary">
+        <tr><td>시공 인정금액</td><td class="num">${won(p.amount.earned_amount)}</td></tr>
+        <tr><td>계약금액</td><td class="num">${won(p.amount.contract_amount)}</td></tr>
+      </table>
+      <p class="muted" style="font-size:17px">${BASIS_LABEL[p.amount.basis] ?? p.amount.basis}</p>
+    </div>
+
+    <div class="card">
+      <h2>보조지표</h2>
+      <table class="summary">
+        <tr><td>천공 공수</td><td class="num">${p.hole_count.completed} / ${p.hole_count.total}공 (${num(p.hole_count.rate)}%)</td></tr>
+        <tr><td>천공연장</td><td class="num">${num(p.length.completed)} / ${num(p.length.total)} m (${num(p.length.rate)}%)</td></tr>
+        <tr><td>투입 공수</td><td class="num">${num(p.man_days)}일</td></tr>
+      </table>
+    </div>
+
+    ${p.by_ground_type.length ? `
+    <div class="card">
+      <h2>지층별 천공량</h2>
+      <table class="summary">
+        ${p.by_ground_type.map((g) => `<tr><td>${g.ground_type_name}</td>
+          <td class="num">${num(g.completed_length)} / ${num(g.planned_length)} m (${num(g.rate)}%)</td></tr>`).join('')}
+      </table>
+      <p class="muted" style="font-size:17px">계획 지층 기준입니다. 지층별 실제 실적은 따로 받지 않습니다.</p>
+    </div>` : ''}
+
+    <div class="card">
+      <h2>기성</h2>
+      ${state.payments.count === 0
+        ? '<p class="muted" style="font-size:17px">아직 기성 회차가 없습니다.</p>'
+        : `<table class="summary">
+            ${state.payments.payments.map((c) => `
+              <tr data-pay="${c.id}"><td>${c.sequence_no}회차 · ${PAY_STATUS[c.status]}<br>
+                <small class="muted">${c.period_from.slice(0, 10)} ~ ${c.period_to.slice(0, 10)}</small></td>
+                <td class="num">${won(c.submitted_amount ?? c.draft_amount)}
+                ${c.submitted_amount === null ? '<br><small class="muted">기성가능액</small>' : ''}</td></tr>`).join('')}
+            <tr><td><b>누계 (제출·승인분)</b></td>
+                <td class="num"><b>${won(state.payments.cumulative_amount)}</b></td></tr>
+          </table>`}
+      <button class="ghost" id="showDraft">이번달 기성가능액 보기</button>
+    </div>
+    <div id="draftBox"></div>
+
+    <button class="ghost" id="back">돌아가기</button>`;
+
+  $('#showDraft').onclick = openPaymentDraft;
+  app.querySelectorAll('tr[data-pay]').forEach((tr) => {
+    tr.onclick = () => openPaymentDetail(tr.dataset.pay);
+  });
+  $('#back').onclick = openMain;
+}
+
+/** §37 기성가능액 — 초안이라는 것을 화면에서도 분명히 한다. */
+async function openPaymentDraft() {
+  const box = $('#draftBox');
+  box.innerHTML = '<div class="card"><p class="muted">계산 중…</p></div>';
+  let d;
+  try {
+    d = await api(`/progress/sites/${state.siteId}/payment-draft`);
+  } catch (e) { box.innerHTML = ''; toast(e.message); return; }
+
+  box.innerHTML = `
+    <div class="card">
+      <h2>기성가능액 (${d.period_from.slice(0, 10)} ~ ${d.period_to.slice(0, 10)})</h2>
+      <div class="bignum">${won(d.draft_amount)}</div>
+      <div class="notice warn">이것은 <b>초안</b>입니다. 실제 제출 기성은 본사가 확정합니다.</div>
+      ${d.issues.map((i) => `<div class="notice warn">${i.message}</div>`).join('')}
+      <table class="summary">
+        <tr><td>대상 천공</td><td class="num">${d.hole_count}공</td></tr>
+        <tr><td>수량</td><td class="num">${num(d.quantity)}</td></tr>
+        <tr><td>앞 회차 누계</td><td class="num">${won(d.previous_amount)}</td></tr>
+        <tr><td>누계 합계</td><td class="num">${won(d.cumulative_amount)}</td></tr>
+      </table>
+    </div>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+/** 회차 상세. 확정된 회차는 그 시점 근거를 그대로 보여준다 (§38). */
+async function openPaymentDetail(id) {
+  let c;
+  try { c = await api(`/progress/payments/${id}`); }
+  catch (e) { toast(e.message); return; }
+
+  app.innerHTML = `
+    <header class="site"><h1>${c.sequence_no}회차 기성</h1>
+      <div class="date">${PAY_STATUS[c.status]} · ${c.period_from.slice(0, 10)} ~ ${c.period_to.slice(0, 10)}</div>
+    </header>
+    <div class="card">
+      <table class="summary">
+        <tr><td>기성가능액 (초안)</td><td class="num">${won(c.draft_amount)}</td></tr>
+        <tr><td>실제 제출 기성</td><td class="num">${c.submitted_amount === null
+          ? '아직 제출 전' : won(c.submitted_amount)}</td></tr>
+        ${c.adjust_reason ? `<tr><td>조정 사유</td><td class="num">${c.adjust_reason}</td></tr>` : ''}
+        <tr><td>대상 천공</td><td class="num">${c.holes.length}공</td></tr>
+        ${c.memo ? `<tr><td>비고</td><td class="num">${c.memo}</td></tr>` : ''}
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>포함된 천공</h2>
+      <div class="tablewrap">
+        <table class="register">
+          <thead><tr><th>PILE NO</th><th>수량</th><th>단가</th><th>금액</th><th>시공일</th></tr></thead>
+          <tbody>
+            ${c.holes.map((h) => `<tr>
+              <th>${h.hole_no}</th>
+              <td>${num(h.contract_quantity)}</td>
+              <td class="${h.unit_price === null ? 'bad' : ''}">${
+                h.unit_price === null ? '단가없음' : num(h.unit_price)}</td>
+              <td>${h.unit_price === null ? '-' : num(h.amount)}</td>
+              <td>${String(h.construction_date).slice(0, 10)}</td></tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <button class="ghost" id="backProgress">공정률로</button>`;
+  $('#backProgress').onclick = () => renderProgress();
 }
 
 /* --------------------------------- 천공조서 / 천공일지 (§34, 사용자 확인) */

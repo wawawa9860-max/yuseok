@@ -47,6 +47,8 @@ async function main(): Promise<void> {
       spec: { mode: 'RANGE', prefix: 'A-', start: 1, end: 60, digits: 3 },
       hole_type_code: 'HPILE', assign_drawing_sequence: true,
       design_depth_total: '20', contract_quantity: '20', contract_unit: 'm',
+      // 계약단가가 없으면 금액 공정률과 기성이 계속 0 으로만 보여 시험이 안 된다.
+      contract_unit_price: '50000',
     });
   await request(app).post(`/api/admin/sites/${id}/ground-assignments/apply`).set(auth)
     .send({

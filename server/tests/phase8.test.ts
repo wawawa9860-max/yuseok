@@ -404,9 +404,11 @@ describe('§29 계약상대방은 원가에 어떤 경로로도 닿지 않는다
   });
 
   it('★ core / share 에 있는 금액 컬럼은 계약금액뿐이다 (내부원가 유출 없음)', async () => {
-    // §44 계약단가·계약금액은 현장관리자가 봐도 되는 값이라 core 에 있다.
+    // §44 계약단가·계약금액·기성은 현장관리자가 봐도 되는 값이라 core 에 있다.
     // 그 외의 금액 컬럼이 core/share 에 생기면 §29 위반이므로 즉시 깨져야 한다.
+    // 여기에 무언가를 더할 때는 "이것이 계약금액인가, 내부원가인가" 를 먼저 답해야 한다.
     const ALLOWED = [
+      // 계약 (§38 revision 포함)
       'core.contract.current_amount',
       'core.contract.original_amount',
       'core.contract_item.amount',
@@ -414,6 +416,11 @@ describe('§29 계약상대방은 원가에 어떤 경로로도 닿지 않는다
       'core.contract_revision.contract_amount',
       'core.hole_master.contract_unit_price',
       'core.hole_revision.contract_unit_price',
+      // 기성 (§37) — 계약금액이지 내부원가가 아니다
+      'core.payment_certificate.draft_amount',
+      'core.payment_certificate.submitted_amount',
+      'core.payment_certificate_hole.amount',
+      'core.payment_certificate_hole.unit_price',
     ];
     const cols = await withSession(HO, async (c) => {
       const r = await c.query(
