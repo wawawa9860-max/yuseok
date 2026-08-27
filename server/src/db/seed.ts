@@ -308,14 +308,17 @@ async function seedSampleRfcipSite(
     ht.rows.map((r: { code: string; id: string }) => [r.code, r.id]));
 
   // 설계 파라미터 — 조서 Y~AB 블록의 원본값
+  // C.T.C 는 구간마다 달라질 수 있어 현장 기본값으로만 둔다 (사용자 확인).
   await c.query(
-    `INSERT INTO core.site_design_param (site_id, param_code, param_name, param_value, unit, note, created_by)
-     VALUES ($1,'DIAMETER','천공 직경',0.6,'m','수량산출서 설계값',$2),
-            ($1,'CTC','C.T.C',0.47,'m','중심간거리',$2),
-            ($1,'WALL_LENGTH','가시설 연장',300,'m','벽면 연장',$2),
-            ($1,'SIDE_PILE_GAP','측면말뚝 간격',1.41,'m',NULL,$2),
-            ($1,'CONCRETE_SURCHARGE','콘크리트 할증률',2,'%','산출근거 기준',$2)
-     ON CONFLICT (site_id, param_code) DO UPDATE SET param_value = EXCLUDED.param_value`,
+    `INSERT INTO core.site_design_param
+       (site_id, param_code, param_name, param_value, unit, note, is_reference, created_by)
+     VALUES ($1,'DIAMETER','천공 직경',0.6,'m','수량산출서 설계값',false,$2),
+            ($1,'CTC','C.T.C',0.47,'m','중심간거리(구간별로 달라질 수 있음)',false,$2),
+            ($1,'WALL_LENGTH','가시설 연장',300,'m','벽면 연장',false,$2),
+            ($1,'SIDE_PILE_GAP','측면말뚝 간격',1.41,'m',NULL,false,$2),
+            ($1,'CONCRETE_SURCHARGE','콘크리트 할증률',2,'%','산출근거 기준',false,$2)
+     ON CONFLICT (site_id, param_code, COALESCE(section, ''))
+       DO UPDATE SET param_value = EXCLUDED.param_value`,
     [siteId, headOfficeId]);
 
   // 조서의 4개 지층 열을 모두 등록한다.

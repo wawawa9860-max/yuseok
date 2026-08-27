@@ -15,6 +15,7 @@ import {
   extractDrawingLabels, filterHoleLabels,
 } from '../src/domain/drawing/extractLabels.js';
 import { analyzeWorkbook } from '../src/domain/quantitySheet/analyze.js';
+import { crossCheck } from '../src/domain/quantitySheet/crossCheck.js';
 
 afterAll(async () => { await closePool(); });
 
@@ -283,5 +284,139 @@ describe('§14 도면 ↔ HOLE_MASTER 대조 및 반영', () => {
     const res = await request(app)
       .post(`/api/admin/sites/${siteId}/drawing-imports`).set(auth(fieldToken));
     expect(res.status).toBe(403);
+  });
+});
+
+/* ============================================ 수정본 v3 회귀 + C.T.C 가변 */
+describe('수량산출서 v3 (수정본) — 지적한 오류가 고쳐졌는지 확인', () => {
+  const SHEET_V3 = join(process.cwd(), 'tests/fixtures/sample-quantity-sheet-v3.xlsx');
+  let a3: Awaited<ReturnType<typeof analyzeWorkbook>>;
+  let a2: Awaited<ReturnType<typeof analyzeWorkbook>>;
+  beforeAll(async () => {
+    a3 = await analyzeWorkbook(SHEET_V3);
+    a2 = await analyzeWorkbook(SHEET_V2);
+  });
+
+  it('합계열 오류가 해소되었다 (580 → 1080, 522 → 972)', () => {
+    expect(a2.blocks[0]!.sheet_grand_total).toBe(580);    // 수정 전
+    expect(a3.blocks[0]!.sheet_grand_total).toBe(1080);   // 수정 후
+    expect(a3.blocks[1]!.sheet_grand_total).toBe(972);
+    expect(a3.warnings.map((w) => w.code)).not.toContain('GRAND_TOTAL_MISMATCH');
+  });
+
+  it('행 합계와 조서 합계열이 이제 일치한다', () => {
+    for (const b of a3.blocks) {
+      expect(b.computed_grand_total).toBe(b.sheet_grand_total);
+    }
+  });
+
+  it('합계행 공수는 아직 29 로 남아 있다 (미해결)', () => {
+    expect(a3.blocks[0]!.sheet_hole_count).toBe(29);
+    expect(a3.blocks[0]!.rows).toHaveLength(54);
+    expect(a3.warnings.map((w) => w.code)).toContain('HOLE_COUNT_MISMATCH');
+  });
+
+  it('교차검증이 전부 통과한다', () => {
+    const cc = crossCheck(a3.blocks, a3.basis_totals);
+    expect(cc.issues.filter((i) => i.severity === 'ERROR')).toEqual([]);
+    const soil = cc.lines.find((l) => l.label === '토사')!;
+    expect(soil.basis_total).toBe(1620);
+    expect(soil.schedule_total).toBe(1620);
+  });
+});
+
+describe('공수의 기준은 도면 넘버링이다 (사용자 확인: C.T.C 가변)', () => {
+  let token = '';
+  let siteId = '';
+
+  beforeAll(async () => {
+    token = await login('head01');
+    const site = await request(app).post('/api/admin/sites').set(auth(token))
+      .send({ site_code: 'CTC_TEST', site_name: 'C.T.C 가변 검증현장' });
+    siteId = site.body.site.id;
+    await request(app).post(`/api/admin/sites/${siteId}/hole-types`).set(auth(token))
+      .send([{ code: 'HPILE', name: 'H-PILE 구간', sort_order: 1 }]);
+    // 도면 넘버링 기준 54공
+    await request(app).post(`/api/admin/sites/${siteId}/holes/bulk`).set(auth(token))
+      .send({ spec: { mode: 'RANGE', start: 1, end: 54 }, hole_type_code: 'HPILE' });
+  });
+
+  it('계산 파라미터는 참고값으로 등록된다', async () => {
+    const res = await request(app).post(`/api/admin/sites/${siteId}/design-params`)
+      .set(auth(token)).send([
+        { param_code: 'WALL_LENGTH', param_name: '가시설 연장', param_value: 50, unit: 'm' },
+        { param_code: 'CTC', param_name: 'C.T.C', param_value: 0.47, unit: 'm' },
+        { param_code: 'TOTAL_HOLE_COUNT', param_name: '총 공수', param_value: 108, unit: '공',
+          is_reference: true, note: '연장÷C.T.C' },
+      ]);
+    expect(res.status).toBe(201);
+    const byCode = new Map(res.body.design_params.map(
+      (p: { param_code: string; is_reference: boolean }) => [p.param_code, p.is_reference]));
+    expect(byCode.get('TOTAL_HOLE_COUNT')).toBe(true);
+    expect(byCode.get('CTC')).toBe(false);
+  });
+
+  it('구간마다 다른 C.T.C 를 따로 등록할 수 있다', async () => {
+    const res = await request(app).post(`/api/admin/sites/${siteId}/design-params`)
+      .set(auth(token)).send([
+        { param_code: 'CTC', param_name: 'C.T.C', param_value: 0.40, unit: 'm',
+          section: '곡선부', note: '간격을 좁힌 구간' },
+      ]);
+    expect(res.status).toBe(201);
+    expect(res.body.design_params[0].section).toBe('곡선부');
+
+    const rows = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT section, param_value::text FROM core.site_design_param
+          WHERE site_id=$1 AND param_code='CTC' ORDER BY section NULLS FIRST`, [siteId]);
+      return r.rows;
+    });
+    // 현장 기본값과 구간값이 함께 존재한다
+    expect(rows).toEqual([
+      { section: null,     param_value: '0.470000' },
+      { section: '곡선부', param_value: '0.400000' },
+    ]);
+  });
+
+  it('★ 계산 공수와 실제 공수가 달라도 오류가 아니다 (INFO)', async () => {
+    const res = await request(app).get(`/api/sites/${siteId}/validation`).set(auth(token));
+    const issue = res.body.issues.find(
+      (i: { code: string }) => i.code === 'HOLE_COUNT_VS_REFERENCE');
+    expect(issue).toBeDefined();
+    expect(issue.severity).toBe('INFO');            // ERROR 가 아니다
+    expect(issue.message).toContain('도면 넘버링');
+    expect(res.body.error_count).toBe(0);
+  });
+
+  it('도면이 반영된 뒤에는 도면 공수가 기준이 된다', async () => {
+    const before = await request(app).get(`/api/sites/${siteId}/validation`).set(auth(token));
+    expect(before.body.issues.map((i: { code: string }) => i.code))
+      .not.toContain('HOLE_COUNT_VS_DRAWING');
+
+    // 도면에 50공만 있다고 가정하고 순번을 매긴다
+    await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT hole_no FROM core.hole_master WHERE site_id=$1 ORDER BY sort_key LIMIT 50`, [siteId]);
+      await c.query('SELECT core.fn_apply_drawing_order($1,$2,$3)',
+        [siteId, r.rows.map((x: { hole_no: string }) => x.hole_no), 'TEST']);
+    });
+
+    const after = await request(app).get(`/api/sites/${siteId}/validation`).set(auth(token));
+    const issue = after.body.issues.find(
+      (i: { code: string }) => i.code === 'HOLE_COUNT_VS_DRAWING');
+    expect(issue).toBeDefined();
+    expect(issue.severity).toBe('WARN');
+    expect(issue.message).toContain('50공');
+  });
+
+  it('구간별 실제 공수를 셀 수 있다', async () => {
+    const rows = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT section, hole_type_code, hole_count FROM core.v_section_hole_count
+          WHERE site_id=$1`, [siteId]);
+      return r.rows;
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].hole_count).toBe(54);
   });
 });

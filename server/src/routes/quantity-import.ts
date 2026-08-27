@@ -506,14 +506,17 @@ quantityImportRouter.post('/quantity-imports/:id/apply', async (req, res, next) 
       // 3) 설계 파라미터
       if (m.import_design_params) {
         for (const dp of analysis.design_params) {
+          const code = paramCode(dp.label);
           await c.query(
             `INSERT INTO core.site_design_param
-               (site_id, param_code, param_name, param_value, unit, note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
-             ON CONFLICT (site_id, param_code) DO UPDATE
-               SET param_value = EXCLUDED.param_value, unit = EXCLUDED.unit
+               (site_id, param_code, param_name, param_value, unit, note, is_reference, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (site_id, param_code, COALESCE(section, '')) DO UPDATE
+               SET param_value = EXCLUDED.param_value, unit = EXCLUDED.unit,
+                   is_reference = EXCLUDED.is_reference
              RETURNING id`,
-            [siteId, paramCode(dp.label), dp.label, dp.value, dp.unit, dp.note, req.actor!.userId]);
+            [siteId, code, dp.label, dp.value, dp.unit, dp.note,
+             REFERENCE_PARAMS.has(code), req.actor!.userId]);
         }
       }
 
@@ -628,6 +631,13 @@ async function createProfile(
       WHERE id=$1`, [profileId, userId]);
   return profileId;
 }
+
+/**
+ * 계산으로 유도되는 파라미터. 확정 근거가 아니다.
+ * 사용자 확인: C.T.C 가 구간마다 달라져 '연장 ÷ C.T.C' 로 공수를 정할 수 없다.
+ * 공수의 기준은 도면 넘버링이다.
+ */
+const REFERENCE_PARAMS = new Set(['TOTAL_HOLE_COUNT', 'HPILE_COUNT', 'MUGEUN_COUNT']);
 
 /** 한글 파라미터명을 안정적인 코드로 바꾼다. */
 function paramCode(label: string): string {

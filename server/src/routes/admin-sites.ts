@@ -136,6 +136,10 @@ const designParam = z.object({
   param_value: z.number().finite(),
   unit: z.string().max(20).optional(),
   note: z.string().max(300).optional(),
+  /** C.T.C 처럼 구간마다 달라지는 값은 구간명을 넣는다. 비우면 현장 전체 기본값. */
+  section: z.string().max(100).optional(),
+  /** 계산으로 얻은 추정치는 확정 근거가 아니다 (예: 연장÷C.T.C). */
+  is_reference: z.boolean().default(false),
 });
 
 adminSiteRouter.post('/:siteId/design-params', async (req, res, next) => {
@@ -150,14 +154,16 @@ adminSiteRouter.post('/:siteId/design-params', async (req, res, next) => {
       for (const it of items) {
         const r = await c.query(
           `INSERT INTO core.site_design_param
-             (site_id, param_code, param_name, param_value, unit, note, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)
-           ON CONFLICT (site_id, param_code) DO UPDATE
+             (site_id, param_code, param_name, param_value, unit, note, section, is_reference, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           ON CONFLICT (site_id, param_code, COALESCE(section, '')) DO UPDATE
              SET param_name = EXCLUDED.param_name, param_value = EXCLUDED.param_value,
-                 unit = EXCLUDED.unit, note = EXCLUDED.note
-           RETURNING id, param_code, param_name, param_value, unit, note`,
+                 unit = EXCLUDED.unit, note = EXCLUDED.note,
+                 is_reference = EXCLUDED.is_reference
+           RETURNING id, param_code, param_name, param_value, unit, note, section, is_reference`,
           [siteId, it.param_code, it.param_name, it.param_value,
-           it.unit ?? null, it.note ?? null, req.actor!.userId]);
+           it.unit ?? null, it.note ?? null, it.section ?? null, it.is_reference,
+           req.actor!.userId]);
         out.push(r.rows[0]);
       }
       return out;
