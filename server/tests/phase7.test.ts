@@ -310,6 +310,35 @@ describe('오프라인 큐 — 같은 요청을 두 번 보내도 한 번만 저
     expect(rows[0].holes).toBe(5);        // 10 이 아니다
   });
 
+  it('★ 동시에 도착해도 두 배가 되지 않는다 (온라인 복귀 순간)', async () => {
+    const reqId = randomUUID();
+    const payload = {
+      work_date: '2026-09-21', from: 'A-080', to: 'A-083',
+      ready_mix: { quantity_m3: '55', has_delay: false }, submit: true,
+    };
+    const send = () => request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).set('X-Client-Request-Id', reqId).send(payload);
+
+    const res = await Promise.all(Array.from({ length: 6 }, send));
+    for (const r of res) expect(r.status).toBe(201);
+    expect(new Set(res.map((r) => r.body.daily_work_id)).size).toBe(1);
+    expect(res.filter((r) => r.body.replayed).length).toBe(res.length - 1);
+
+    const rows = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT r.quantity_m3::text AS qty, count(d.hole_id)::int AS holes
+           FROM core.daily_work w
+           JOIN core.daily_ready_mix r ON r.daily_work_id = w.id
+           LEFT JOIN core.daily_work_hole d ON d.daily_work_id = w.id
+          WHERE w.site_id=$1 AND w.work_date='2026-09-21'
+          GROUP BY r.quantity_m3`, [siteId]);
+      return r.rows;
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].qty).toBe('55.000');
+    expect(rows[0].holes).toBe(4);
+  });
+
   it('요청 ID 가 없으면 멱등 처리하지 않는다 (기존 동작 유지)', async () => {
     const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
       .set(auth(fieldToken)).send({

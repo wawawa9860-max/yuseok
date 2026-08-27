@@ -16,7 +16,7 @@ import { z } from 'zod';
 import { withSession, type SessionClient } from '../db/pool.js';
 import { badRequest, notFound } from '../http/errors.js';
 import { requireAuth } from '../http/context.js';
-import { findStored, remember, requestId } from '../http/idempotency.js';
+import { claim, findStored, remember, requestId } from '../http/idempotency.js';
 
 export const fieldRouter = Router();
 fieldRouter.use(requireAuth);
@@ -265,6 +265,7 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
       // 오프라인 큐가 같은 요청을 다시 보냈다면 처음 처리한 응답을 그대로 돌려준다.
       // 이것이 없으면 재전송 때마다 레미콘·공수가 두 배로 쌓인다.
       if (reqId) {
+        await claim(c, reqId);   // 동시에 온 같은 요청을 줄 세운다
         const stored = await findStored(c, reqId);
         if (stored) return { ...(stored.body as object), replayed: true };
       }

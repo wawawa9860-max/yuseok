@@ -34,6 +34,10 @@ const state = {
   laborSame: null, laborChanges: [],
   equipSame: null, equipChanges: [],
   readyMix: null,
+  cost: null,          // §27 비용 입력 중인 내용
+  costTypes: [],
+  recentCosts: [],
+  evidenceRate: null,
 };
 
 /* ------------------------------------------------------------------ 통신 */
@@ -64,6 +68,36 @@ async function api(path, options = {}) {
     }
     const err = new Error(body.message || '오류가 발생했습니다.');
     err.permanent = true;     // 검증 실패 등은 다시 보내도 소용없다
+    throw err;
+  }
+  return body;
+}
+
+/** 사진 업로드는 multipart 라 Content-Type 을 브라우저가 정하게 둔다. */
+async function apiUpload(path, file, filename) {
+  const form = new FormData();
+  form.append('file', file, filename);
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      method: 'POST',
+      headers: state.token ? { Authorization: `Bearer ${state.token}` } : {},
+      body: form,
+    });
+  } catch {
+    const err = new Error('통신이 되지 않습니다.');
+    err.offline = true;
+    throw err;
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status >= 500) {
+      const err = new Error(body.message || '서버 오류입니다.');
+      err.offline = true;
+      throw err;
+    }
+    const err = new Error(body.message || '사진을 올리지 못했습니다.');
+    err.permanent = true;
     throw err;
   }
   return body;
@@ -105,7 +139,19 @@ async function fetchWithCache(name, path) {
 
 /* -------------------------------------------------------- 오프라인 큐 */
 /** 큐에 쌓인 항목을 서버로 보낸다. */
-async function sendQueued(item) {
+async function sendQueued(item, done) {
+  // 영수증 사진은 비용이 먼저 저장돼야 붙일 수 있다.
+  if (item.kind === 'evidence') {
+    // 비용이 이미 저장돼 있으면 그 id 를, 아니면 방금 보낸 비용의 응답에서 찾는다.
+    const costId = item.cost_id || done?.get(item.after)?.cost?.id;
+    if (!costId) {
+      // 앞의 비용이 이번에 안 보내졌다면 사진도 미룬다 (다음 기회에 같이 보낸다).
+      const err = new Error('비용 저장을 기다립니다.');
+      err.offline = true;
+      throw err;
+    }
+    return apiUpload(`/cost/costs/${costId}/evidence`, item.file, item.filename);
+  }
   return api(item.path, {
     method: 'POST',
     headers: { 'X-Client-Request-Id': item.request_id },
@@ -113,14 +159,21 @@ async function sendQueued(item) {
   });
 }
 
+// 통신이 돌아오는 순간 online 이벤트와 화면 진입이 겹쳐 두 번 보내려 할 수 있다.
+// 서버도 같은 요청 ID 를 줄 세우지만, 굳이 두 번 보낼 이유는 없다.
+let flushing = false;
+
 async function flushQueue({ silent = true } = {}) {
-  if (!navigator.onLine) return;
+  if (!navigator.onLine || flushing) return;
   const before = await pendingCount();
   if (before === 0) return;
-  const r = await flush(sendQueued);
-  state.pending = await pendingCount();
-  if (r.sent > 0 && !silent) toast(`저장 대기 ${r.sent}건을 보냈습니다.`);
-  if (r.sent > 0) await openMain();
+  flushing = true;
+  try {
+    const r = await flush(sendQueued);
+    state.pending = await pendingCount();
+    if (r.sent > 0 && !silent) toast(`저장 대기 ${r.sent}건을 보냈습니다.`);
+    if (r.sent > 0) await openMain();
+  } finally { flushing = false; }
 }
 
 window.addEventListener('online', () => flushQueue({ silent: false }));
@@ -227,7 +280,7 @@ async function openMain() {
 
     <button class="primary" id="goInput">${submitted ? '오늘 작업 다시 입력' : '오늘 작업 입력'}</button>
     <button class="later" disabled>천공현황 / 도면 · 준비중</button>
-    <button class="later" disabled>비용 · 증빙 · 준비중</button>
+    <button id="goCost">비용 · 증빙</button>
     <button class="later" disabled>특이사항 · 준비중</button>
     <button class="later" disabled>오늘 보고서 · 준비중</button>
     <button class="later" disabled>카카오톡 공유 · 준비중</button>
@@ -235,6 +288,7 @@ async function openMain() {
     <button class="ghost" id="switchSite">다른 현장 / 로그아웃</button>`;
 
   $('#goInput').onclick = openInput;
+  $('#goCost').onclick = openCost;
   $('#switchSite').onclick = () => {
     if (state.sites.length > 1) { renderSitePicker(); } else { logout(); renderLogin(); }
   };
@@ -570,6 +624,191 @@ async function renderGroundOptions() {
       renderSummary();
     };
   });
+}
+
+/* ------------------------------------------------ §27 비용 · 증빙 (PHASE 8) */
+/*
+ * 현장관리자가 하는 일은 두 가지뿐이다.
+ *   1) 오늘 쓴 돈을 고르고 금액을 적는다
+ *   2) 영수증 사진을 찍는다
+ * 원가 합계·손익은 이 화면에 없다. 서버가 애초에 내려주지 않는다 (§29).
+ *
+ * 노무비·장비비는 본사 단가로 자동계산된다. 여기서 다시 묻지 않는다 (§1-2 중복입력 금지).
+ */
+const FIELD_COST_TYPES = ['C03', 'C04', 'C05', 'C06'];
+
+async function openCost() {
+  try {
+    const [types, recent, rate] = await Promise.all([
+      fetchWithCache('costTypes', '/cost/cost-types'),
+      fetchWithCache('recentCosts', `/cost/sites/${state.siteId}/costs?limit=20`),
+      api(`/cost/sites/${state.siteId}/evidence-rate`).catch(() => null),
+    ]);
+    state.costTypes = types.data.cost_types.filter((t) => FIELD_COST_TYPES.includes(t.code));
+    state.recentCosts = recent.data.costs;
+    state.evidenceRate = rate;
+    state.stale = types.stale || recent.stale;
+  } catch (e) { toast(e.message); return; }
+  state.cost = null;
+  renderCost();
+}
+
+function renderCost() {
+  const r = state.evidenceRate;
+  app.innerHTML = `
+    <header class="site">
+      <h1>비용 · 증빙</h1>
+      <div class="date">${dateLabel(state.today.date)}</div>
+    </header>
+
+    ${r ? `
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><div class="label">이번달 증빙</div>
+          <div class="value">${num(r.evidence_rate)}<span class="unit">%</span></div></div>
+        <div class="stat"><div class="label">증빙대기</div>
+          <div class="value">${r.pending_count}<span class="unit">건</span></div></div>
+      </div>
+    </div>` : ''}
+    ${state.stale ? '<div class="notice warn">통신이 안 되어 마지막으로 받은 내용을 보여줍니다.</div>' : ''}
+
+    <div class="card">
+      <div class="question">무엇에 쓴 돈입니까?</div>
+      <div class="picker" style="max-height:none">
+        ${state.costTypes.map((t) => `<button data-code="${t.code}"
+          aria-pressed="${state.cost?.cost_type === t.code}">${t.name_ko}</button>`).join('')}
+      </div>
+      <p class="muted" style="font-size:17px">노무비·장비비는 본사가 단가로 계산합니다. 적지 않아도 됩니다.</p>
+    </div>
+
+    <div id="costDetail"></div>
+
+    ${state.recentCosts.length ? `
+    <div class="card">
+      <h2>최근 입력</h2>
+      <table class="summary">
+        ${state.recentCosts.slice(0, 8).map((c) => `
+          <tr><td>${c.cost_date.slice(5, 10)} ${c.cost_type_name}</td>
+              <td class="num">${num(c.amount)}원</td>
+              <td class="num">${c.evidence_status === 'VERIFIED' ? '증빙완료'
+                : c.evidence_status === 'HEAD_OFFICE_REVIEW' ? '본사확인' : '증빙대기'}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    <button class="ghost" id="back">돌아가기</button>`;
+
+  app.querySelectorAll('button[data-code]').forEach((b) => {
+    b.onclick = () => {
+      state.cost = { cost_type: b.dataset.code, amount: '', file: null };
+      renderCost();
+    };
+  });
+  $('#back').onclick = openMain;
+  if (state.cost) renderCostDetail();
+}
+
+/** 항목을 고른 다음에만 나온다. */
+function renderCostDetail() {
+  const box = $('#costDetail');
+  const c = state.cost;
+  // §1-5 전일값 재사용 — 같은 항목을 마지막으로 얼마 썼는지 한 번에 넣는다.
+  const last = state.recentCosts.find((x) => x.cost_type === c.cost_type);
+  const typeName = state.costTypes.find((t) => t.code === c.cost_type)?.name_ko ?? '';
+
+  box.innerHTML = `
+    <div class="card">
+      <div class="question">${typeName} 얼마입니까?</div>
+      ${last ? `<button class="ghost" id="sameAsLast">지난번과 같음 · ${num(last.amount)}원</button>` : ''}
+      <label class="field"><span class="label">금액 (원)</span>
+        <input id="costAmount" inputmode="numeric" value="${c.amount}"></label>
+      <label class="field"><span class="label">거래처 (없으면 비워두십시오)</span>
+        <input id="costVendor" value="${c.vendor ?? ''}"></label>
+
+      <div class="question" style="margin-top:16px">영수증 사진</div>
+      <input id="costPhoto" type="file" accept="image/*" capture="environment" hidden>
+      <button class="ghost" id="takePhoto">${c.file ? `사진 1장 · 다시 찍기` : '사진 찍기'}</button>
+      <p class="muted" style="font-size:17px">사진이 없어도 저장됩니다. 나중에 붙이면 증빙완료가 됩니다.</p>
+
+      <button class="primary" id="saveCost">저장</button>
+    </div>`;
+
+  $('#sameAsLast') && ($('#sameAsLast').onclick = () => {
+    state.cost.amount = String(last.amount).replace(/\.00$/, '');
+    state.cost.vendor = last.vendor ?? '';
+    renderCostDetail();
+  });
+  $('#costAmount').onchange = () => { state.cost.amount = $('#costAmount').value.trim(); };
+  $('#costVendor').onchange = () => { state.cost.vendor = $('#costVendor').value.trim(); };
+  $('#takePhoto').onclick = () => $('#costPhoto').click();
+  $('#costPhoto').onchange = () => {
+    state.cost.file = $('#costPhoto').files[0] ?? null;
+    renderCostDetail();
+  };
+  $('#saveCost').onclick = saveCost;
+}
+
+async function saveCost() {
+  const c = state.cost;
+  const amount = String(c.amount ?? '').replace(/[,\s원]/g, '');
+  if (!/^\d+(\.\d+)?$/.test(amount)) { toast('금액을 적어 주십시오.'); return; }
+
+  const btn = $('#saveCost');
+  btn.disabled = true; btn.textContent = '저장 중…';
+
+  const payload = { cost_date: state.today.date, cost_type: c.cost_type, amount };
+  if (c.vendor) payload.vendor = c.vendor;
+  const requestId = newRequestId();
+  const path = `/cost/sites/${state.siteId}/costs`;
+
+  try {
+    const saved = await api(path, {
+      method: 'POST',
+      headers: { 'X-Client-Request-Id': requestId },
+      body: JSON.stringify(payload),
+    });
+    if (c.file) {
+      try {
+        await apiUpload(`/cost/costs/${saved.cost.id}/evidence`, c.file, c.file.name || 'receipt.jpg');
+        toast('저장했습니다. 증빙완료.');
+      } catch (e) {
+        if (e.offline) {
+          await enqueueEvidence(requestId, c.file, saved.cost.id);
+          toast('비용은 저장했고 사진은 통신되면 보냅니다.', 4000);
+        } else { toast(`비용은 저장했으나 사진을 올리지 못했습니다: ${e.message}`, 4000); }
+      }
+    } else {
+      toast('저장했습니다. 증빙대기.');
+    }
+    await openCost();
+  } catch (e) {
+    if (e.offline) {
+      await enqueue({
+        id: requestId, request_id: requestId, queued_at: Date.now(),
+        kind: 'cost', path, payload,
+        label: `${payload.cost_date} ${payload.cost_type} ${payload.amount}원`,
+      });
+      // 사진은 비용이 저장된 뒤에 붙는다. 큐에서 순서를 지킨다.
+      if (c.file) await enqueueEvidence(requestId, c.file, null);
+      state.pending = await pendingCount();
+      toast('통신이 안 되어 저장 대기로 넘겼습니다. 통신되면 자동으로 보냅니다.', 4000);
+      await openMain();
+    } else {
+      toast(e.message);
+      btn.disabled = false; btn.textContent = '저장';
+    }
+  }
+}
+
+/** 영수증 사진을 큐에 넣는다. after 는 앞선 비용 저장 요청의 ID 다. */
+async function enqueueEvidence(afterRequestId, file, costId) {
+  const id = newRequestId();
+  await enqueue({
+    id, request_id: id, queued_at: Date.now() + 1,
+    kind: 'evidence', after: afterRequestId, cost_id: costId,
+    file, filename: file.name || 'receipt.jpg',
+    label: '영수증 사진',
+  });
+  state.pending = await pendingCount();
 }
 
 /* ------------------------------------------------------------------ 저장 */

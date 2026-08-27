@@ -67,14 +67,20 @@ export async function remove(id) {
 
 /**
  * 쌓인 요청을 순서대로 다시 보낸다.
- * send(item) 은 성공하면 응답, 네트워크 문제면 throw 해야 한다.
+ * send(item, done) 은 성공하면 응답, 네트워크 문제면 throw 해야 한다.
+ *
+ * done 은 '이번에 보낸 것들의 응답'이다 (요청ID → 응답).
+ * 영수증 사진처럼 앞 요청의 결과(비용 id)가 있어야 보낼 수 있는 항목이 있다.
+ * 순서대로 보내고 실패하면 멈추므로 앞 항목의 응답을 뒤 항목이 쓸 수 있다.
  */
 export async function flush(send) {
   const items = await pending();
   const result = { sent: 0, failed: 0, dropped: 0 };
+  const done = new Map();
   for (const item of items) {
     try {
-      await send(item);
+      const res = await send(item, done);
+      done.set(item.id, res);
       await remove(item.id);
       result.sent++;
     } catch (e) {

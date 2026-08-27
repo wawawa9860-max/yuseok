@@ -12,6 +12,7 @@ import { groundAssignRouter } from './routes/admin-ground-assign.js';
 import { quantityImportRouter } from './routes/quantity-import.js';
 import { drawingImportRouter } from './routes/drawing-import.js';
 import { fieldRouter } from './routes/field-daily.js';
+import { costAdminRouter, costRouter } from './routes/cost.js';
 import { HttpError } from './http/errors.js';
 import { logAccessDenied } from './http/context.js';
 
@@ -37,6 +38,8 @@ export function createApp() {
   app.use('/api/admin', quantityImportRouter);
   app.use('/api/admin', drawingImportRouter);
   app.use('/api/field', fieldRouter);
+  app.use('/api/cost', costRouter);
+  app.use('/api/admin/cost', costAdminRouter);
   app.use('/api', contractRouter);
 
   app.use((_req, res) => res.status(404).json({ error: 'NOT_FOUND', message: '경로를 찾을 수 없습니다.' }));
