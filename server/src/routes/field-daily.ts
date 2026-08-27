@@ -208,13 +208,13 @@ const saveInput = rangeInput.extend({
     actual_depth_total: z.union([z.number(), z.string()])
       .transform((v) => String(v))
       .refine((v) => /^\d+(\.\d+)?$/.test(v) && Number(v) > 0, '실제심도는 0보다 커야 합니다.'),
-  })).max(500).optional(),
+  })).max(500).nullish(),
   /** §15 지반조건에 다른 점이 있었습니까? — 기본은 '없음'. */
   ground_notes: z.array(z.object({
     note_type: z.string().min(1).max(50),
     memo: z.string().max(500).optional(),
     hole_nos: z.array(z.string().max(60)).max(200).optional(),
-  })).max(20).optional(),
+  })).max(20).nullish(),
   next_day_plan: z.string().max(300).optional(),
   memo: z.string().max(500).optional(),
   /** true 면 입력완료(SUBMITTED) 상태로 만든다 */
@@ -228,7 +228,7 @@ const saveInput = rangeInput.extend({
     role_name: z.string().min(1).max(50),
     headcount: amount('인원'),
     note: z.string().max(200).optional(),
-  })).max(50).optional(),
+  })).max(50).nullish(),
 
   /** §22 오늘 장비는 기본설정과 동일합니까? 변경만 입력한다. */
   equipment_same_as_default: z.boolean().default(true),
@@ -237,16 +237,19 @@ const saveInput = rangeInput.extend({
     quantity: amount('수량'),
     charge_type: z.enum(['DAILY', 'MONTHLY', 'OTHER']).optional(),
     note: z.string().max(200).optional(),
-  })).max(50).optional(),
+  })).max(50).nullish(),
 
-  /** §23 레미콘 */
+  /**
+   * §23 레미콘. 타설이 없는 날도 있으므로 없어도 된다.
+   * 화면이 빈 값을 null 로 보내는 경우까지 '없음' 으로 받는다.
+   */
   ready_mix: z.object({
     quantity_m3: amount('반입량'),
     has_delay: z.boolean().default(false),
     delay_minutes: z.number().int().positive().max(1440).optional(),
     delay_reason: z.string().max(50).optional(),
     memo: z.string().max(300).optional(),
-  }).optional(),
+  }).nullish(),
 });
 
 fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {

@@ -577,20 +577,22 @@ async function submitDaily() {
   const btn = $('#submit');
   btn.disabled = true; btn.textContent = '저장 중…';
 
+  // 비어 있는 항목은 아예 보내지 않는다. null 을 보내면 서버가 형식 오류로 본다.
   const payload = {
     work_date: state.today.date,
     from: state.pick.from, to: state.pick.to,
     depth_same_as_plan: state.depthSame,
-    depth_exceptions: Object.entries(state.depthExceptions)
-      .map(([hole_no, actual_depth_total]) => ({ hole_no, actual_depth_total })),
-    ground_notes: state.groundNotes,
     labor_same_as_default: state.laborSame !== false,
-    labor_changes: state.laborChanges,
     equipment_same_as_default: state.equipSame !== false,
-    equipment_changes: state.equipChanges,
-    ready_mix: state.readyMix,
     submit: true,
   };
+  const exceptions = Object.entries(state.depthExceptions)
+    .map(([hole_no, actual_depth_total]) => ({ hole_no, actual_depth_total }));
+  if (exceptions.length) payload.depth_exceptions = exceptions;
+  if (state.groundNotes.length) payload.ground_notes = state.groundNotes;
+  if (state.laborChanges.length) payload.labor_changes = state.laborChanges;
+  if (state.equipChanges.length) payload.equipment_changes = state.equipChanges;
+  if (state.readyMix && state.readyMix.quantity_m3) payload.ready_mix = state.readyMix;
   const requestId = newRequestId();
 
   try {

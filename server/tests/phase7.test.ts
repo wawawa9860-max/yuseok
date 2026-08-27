@@ -433,3 +433,39 @@ describe('§29 인원·장비를 넣어도 단가는 노출되지 않는다', ()
     expect(rows).toEqual([]);
   });
 });
+
+/* ============================================ 빈 항목 처리 (회귀) */
+describe('레미콘을 비우고 저장할 수 있다 (회귀)', () => {
+  it('★ ready_mix 없이 저장된다', async () => {
+    const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-09-25', from: 'A-070', to: 'A-072', submit: true,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.ready_mix).toBeNull();
+    expect(res.body.today_hole_count).toBe(3);
+  });
+
+  it('★ 화면이 빈 값을 null 로 보내도 받아들인다', async () => {
+    // 실제로 났던 버그: 레미콘을 비운 채 저장하면 "Expected object, received null"
+    const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-09-26', from: 'A-073', to: 'A-075',
+        ready_mix: null, labor_changes: null, equipment_changes: null,
+        depth_exceptions: null, ground_notes: null, submit: true,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.today_hole_count).toBe(3);
+    expect(res.body.labor.length).toBeGreaterThan(0);   // 기본 인원은 그대로 적용
+  });
+
+  it('반입량이 0 이면 0 으로 저장된다 (없음과 구분)', async () => {
+    const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-09-27', from: 'A-076', to: 'A-077',
+        ready_mix: { quantity_m3: '0', has_delay: false }, submit: true,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.ready_mix.quantity_m3).toBe('0.000');
+  });
+});
