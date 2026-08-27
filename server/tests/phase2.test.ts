@@ -260,13 +260,32 @@ describe('§17 현장 최초설정 STEP 1~5', () => {
   });
 
   it('설정 진행상황이 남은 단계를 알려준다', async () => {
+    // 단계 구성이 '본사 사전 업로드 5종' 기준으로 바뀌었다 (사용자 확인 2026-08-27).
+    // 번호가 아니라 이름으로 본다.
     const res = await request(app).get(`/api/admin/sites/${siteId}/setup-status`).set(auth(token));
     expect(res.status).toBe(200);
-    const byStep = new Map(res.body.steps.map((s: { step: number; done: boolean }) => [s.step, s.done]));
-    expect(byStep.get(2)).toBe(true);    // 계약 등록됨
-    expect(byStep.get(5)).toBe(true);    // 천공번호 생성됨
-    expect(byStep.get(7)).toBe(false);   // 지반조건 아직
-    expect(res.body.next_step).toBe(3);  // 수량산출서 등록이 다음
+    const byName = new Map(res.body.steps.map(
+      (s: { step_name: string; done: boolean }) => [s.step_name, s.done]));
+    // 계약 '건' 만 있고 내역서(문서·품목)가 없으면 아직 미완료다.
+    // 단가가 여기서 오므로 계약번호만 있는 것으로는 부족하다 (사용자 확인 2026-08-27).
+    expect(byName.get('① 계약내역서')).toBe(false);
+    expect(byName.get('천공번호 생성 (도면 넘버링 기준)')).toBe(true);
+    expect(byName.get('천공번호별 지반조건 · 계획심도')).toBe(false);
+    const next = res.body.steps.find((s: { step: number }) => s.step === res.body.next_step);
+    expect(next.step_name).toBe('① 계약내역서');
+  });
+
+  it('★ 계약내역 품목을 넣으면 ① 계약내역서가 완료된다', async () => {
+    const list = await request(app).get(`/api/sites/${siteId}/contracts`).set(auth(token));
+    const contractId = list.body.contracts[0].id;
+    await request(app).post(`/api/contracts/${contractId}/items`).set(auth(token))
+      .send({ items: [{ item_code: 'CIP-600', item_name: 'C.I.P 천공 D=600',
+                        unit: 'm', quantity: '600', unit_price: '50000' }] });
+
+    const res = await request(app).get(`/api/admin/sites/${siteId}/setup-status`).set(auth(token));
+    const step = res.body.steps.find((s: { step_name: string }) => s.step_name === '① 계약내역서');
+    expect(step.done).toBe(true);
+    expect(step.detail).toContain('내역품목 1개');
   });
 });
 

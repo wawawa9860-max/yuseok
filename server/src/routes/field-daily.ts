@@ -202,12 +202,25 @@ fieldRouter.post('/sites/:siteId/daily-work/preview', async (req, res, next) => 
 /* ====================================================== 저장 (§15, §16) */
 const saveInput = rangeInput.extend({
   /** §16 계획심도와 동일합니까? — 기본은 '예'. 예외만 따로 받는다. */
+  /**
+   * §16 계획심도까지 뚫었습니까?
+   *
+   * 현장은 숫자를 적지 않는다. '갔다 / 못 갔다' 만 고른다 (사용자 확인 2026-08-27).
+   * 계획심도는 천공조서에 이미 있고, 평면도 넘버링으로 공이 정해져 있다.
+   * 못 간 공만 골라서 사유를 남긴다.
+   */
   depth_same_as_plan: z.boolean().default(true),
   depth_exceptions: z.array(z.object({
     hole_no: z.string().min(1).max(60),
+    /**
+     * 미달이면 어디까지 갔는지. 이것이 없으면 수량이 계획심도로 잡혀 과다계상된다.
+     * 예외 경로에서만 묻는 값이라 현장 부담은 늘지 않는다.
+     */
     actual_depth_total: z.union([z.number(), z.string()])
       .transform((v) => String(v))
       .refine((v) => /^\d+(\.\d+)?$/.test(v) && Number(v) > 0, '실제심도는 0보다 커야 합니다.'),
+    /** 왜 계획심도까지 못 갔는지. 없으면 저장을 막는다 (DB 제약조건). */
+    shortfall_reason: z.string().min(1).max(100),
   })).max(500).nullish(),
   /** §15 지반조건에 다른 점이 있었습니까? — 기본은 '없음'. */
   ground_notes: z.array(z.object({
@@ -307,30 +320,30 @@ fieldRouter.post('/sites/:siteId/daily-work', async (req, res, next) => {
       const workId = work.rows[0]!.id as string;
 
       const exceptions = new Map(
-        (d.depth_exceptions ?? []).map((e) => [e.hole_no, e.actual_depth_total]));
+        (d.depth_exceptions ?? []).map((e) =>
+          [e.hole_no, { actual: e.actual_depth_total ?? null, reason: e.shortfall_reason }]));
       const unknownHoleNos = [...exceptions.keys()]
         .filter((n) => !fresh.some((h) => h.hole_no === n));
       if (unknownHoleNos.length > 0) {
         throw badRequest(
-          `실제심도를 입력한 ${unknownHoleNos.join(', ')} 이(가) 오늘 선택범위에 없습니다.`,
+          `미달로 표시한 ${unknownHoleNos.join(', ')} 이(가) 오늘 선택범위에 없습니다.`,
           'DEPTH_EXCEPTION_NOT_IN_RANGE');
       }
 
       for (const h of fresh) {
-        const actual = exceptions.get(h.hole_no);
-        // 화면 문구 그대로다: "다른 공만 적으십시오. 비워두면 계획심도를 씁니다."
-        // 날짜 단위 [아니오] 는 입력칸을 여는 스위치일 뿐, 모든 공이 다르다는 뜻이 아니다.
-        // 여기서 d.depth_same_as_plan 을 그대로 쓰면 안 적은 공이 '다름 + 실제심도 없음' 이
-        // 되어 저장이 통째로 깨진다.
-        const same = actual === undefined;
+        const ex = exceptions.get(h.hole_no);
+        // 고른 공만 미달이다. 나머지는 계획심도까지 간 것으로 본다.
+        // 날짜 단위 [아니오] 는 입력칸을 여는 스위치일 뿐, 모든 공이 미달이라는 뜻이 아니다.
+        const reached = ex === undefined;
         await c.query(
           `INSERT INTO core.daily_work_hole
-             (daily_work_id, hole_id, depth_same_as_plan, actual_depth_total)
-           VALUES ($1,$2,$3,$4)
+             (daily_work_id, hole_id, depth_same_as_plan, actual_depth_total, shortfall_reason)
+           VALUES ($1,$2,$3,$4,$5)
            ON CONFLICT (daily_work_id, hole_id) DO UPDATE
              SET depth_same_as_plan = EXCLUDED.depth_same_as_plan,
-                 actual_depth_total = EXCLUDED.actual_depth_total`,
-          [workId, h.hole_id, same, actual ?? null]);
+                 actual_depth_total = EXCLUDED.actual_depth_total,
+                 shortfall_reason   = EXCLUDED.shortfall_reason`,
+          [workId, h.hole_id, reached, ex?.actual ?? null, ex?.reason ?? null]);
       }
 
       // §15 특이사항은 '있음' 일 때만 저장된다
@@ -612,6 +625,21 @@ fieldRouter.get('/sites/:siteId/equipment-log', async (req, res, next) => {
       return { days: days.rows, by_equipment: byEquip.rows };
     });
     res.json({ from, to, ...data });
+  } catch (e) { next(e); }
+});
+
+/**
+ * §16 계획심도 미달 사유 선택지 (사용자 확인 2026-08-27).
+ * 현장은 숫자를 적지 않고 '못 갔다' 를 고른 뒤 사유를 누른다.
+ */
+fieldRouter.get('/shortfall-reasons', requireAuth, async (req, res, next) => {
+  try {
+    const rows = await withSession(req.actor!, async (c) => {
+      const r = await c.query(
+        'SELECT reason, sort_order FROM core.fn_shortfall_reasons() ORDER BY sort_order');
+      return r.rows as { reason: string }[];
+    });
+    res.json({ reasons: rows.map((x) => x.reason) });
   } catch (e) { next(e); }
 });
 

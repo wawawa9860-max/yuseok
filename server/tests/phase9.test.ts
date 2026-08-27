@@ -70,7 +70,8 @@ beforeAll(async () => {
     .send({
       work_date: '2026-12-01', from: 'R-001', to: 'R-005',
       depth_same_as_plan: false,
-      depth_exceptions: [{ hole_no: 'R-003', actual_depth_total: '22.5' }],
+      depth_exceptions: [{ hole_no: 'R-003', actual_depth_total: '17.5',
+                           shortfall_reason: '전석·호박돌' }],
       ready_mix: { quantity_m3: '30', has_delay: true, delay_minutes: 60,
                    delay_reason: '레미콘공장' },
       labor_same_as_default: false,
@@ -112,9 +113,9 @@ describe('§33 작업일보는 자동으로 만들어진다', () => {
   it('★ 금일 천공연장은 실제심도를 쓴다 (계획 20×5=100 이 아니라 102.5)', async () => {
     const res = await report('2026-12-01');
     expect(res.body.today.hole_count).toBe(5);
-    expect(res.body.today.length).toBe('102.500');   // 20×4 + 22.5
+    expect(res.body.today.length).toBe('97.500');    // 20×4 + 17.5(미달)
     const deep = res.body.hole_numbers.find((h: { hole_no: string }) => h.hole_no === 'R-003');
-    expect(deep.actual_depth_total).toBe('22.500');
+    expect(deep.actual_depth_total).toBe('17.500');
     expect(deep.depth_same_as_plan).toBe(false);
   });
 
@@ -197,7 +198,7 @@ describe('§34 천공일지는 Hole 별로 자동생성된다', () => {
     expect(res.body.hole_no).toBe('R-003');
     expect(res.body.hole_type).toBe('H-PILE 구간');
     expect(res.body.design_depth_total).toBe('20.000');
-    expect(res.body.actual_depth_total).toBe('22.500');
+    expect(res.body.actual_depth_total).toBe('17.500');
     expect(res.body.status).toBe('COMPLETED');
     expect(res.body.construction_date).toBe('2026-12-01');
   });
@@ -205,7 +206,7 @@ describe('§34 천공일지는 Hole 별로 자동생성된다', () => {
   it('★ 계획과 실제의 차이를 숨기지 않는다', async () => {
     const res = await request(app)
       .get(`/api/reports/sites/${siteId}/holes/R-003/log`).set(auth(fieldToken));
-    expect(res.body.depth_diff).toBe('2.500');
+    expect(res.body.depth_diff).toBe('-2.500');   // 계획심도까지 못 갔다
   });
 
   it('계획 지층이 순서대로 나온다', async () => {
@@ -263,10 +264,10 @@ describe('§35 세 가지가 항상 일치한다', () => {
     expect(res.body.consistent).toBe(true);
   });
 
-  it('연장도 같다 (102.5m)', async () => {
+  it('연장도 같다 (97.5m)', async () => {
     const res = await request(app)
       .get(`/api/reports/sites/${siteId}/progress-consistency`).set(auth(fieldToken));
-    for (const s of res.body.sources) expect(Number(s.length)).toBe(102.5);
+    for (const s of res.body.sources) expect(Number(s.length)).toBe(97.5);
   });
 
   it('★ 어긋나면 ERROR 로 잡아낸다 (음성 검증)', async () => {
@@ -445,8 +446,8 @@ describe('§34 천공일지는 천공조서와 같은 칸 구성이다', () => {
       .set(auth(fieldToken));
     expect(res.body.rows).toHaveLength(5);
     const r3 = res.body.rows.find((r: { hole_no: string }) => r.hole_no === 'R-003');
-    expect(r3.actual_depth_total).toBe('22.500');
-    expect(r3.depth_diff).toBe('2.500');
+    expect(r3.actual_depth_total).toBe('17.500');
+    expect(r3.depth_diff).toBe('-2.500');
     expect(r3.construction_date).toBe('2026-12-01');
   });
 

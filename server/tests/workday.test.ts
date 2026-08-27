@@ -429,3 +429,44 @@ describe('§29 정산방식과 단가는 본사만 본다', () => {
     expect(cols).toEqual([]);
   });
 });
+
+/* ======== 월대·월급 / 일대·일당 두 갈래 + 월 단위 기본 (사용자 확인 2026-08-27) ======== */
+describe('§26 계약방식은 월과 일 두 갈래다', () => {
+  it('★ 기타(OTHER)도 일 단위로 계산한다', async () => {
+    const basis = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT core.fn_charge_basis('MONTHLY') m, core.fn_charge_basis('DAILY') d,
+                core.fn_charge_basis('OTHER') o`);
+      return r.rows[0];
+    });
+    expect(basis).toMatchObject({ m: 'MONTHLY', d: 'DAILY', o: 'DAILY' });
+  });
+
+  it('★ 월 단위가 기본이다 — 지정하지 않으면 월액 전액(FIXED)', async () => {
+    const method = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT column_default FROM information_schema.columns
+          WHERE table_schema='private_cost' AND table_name='monthly_settlement'
+            AND column_name='method'`);
+      return r.rows[0].column_default as string;
+    });
+    expect(method).toContain('FIXED');
+  });
+
+  it('일할로 마감할 때만 사유와 함께 지정한다', async () => {
+    const res = await request(app).put(`/api/admin/cost/sites/${siteId}/settlement`)
+      .set(auth(headToken)).send({
+        target_kind: 'EQUIPMENT', target_name: '천공기', year_month: '2026-11',
+        method: 'PRORATED', reason: '11월 중순 장비 반출 — 일자 정산',
+      });
+    expect(res.status).toBe(200);
+    const row = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT method, reason FROM private_cost.monthly_settlement
+          WHERE site_id=$1 AND target_name='천공기'`, [siteId]);
+      return r.rows[0];
+    });
+    expect(row.method).toBe('PRORATED');
+    expect(row.reason).toContain('일자 정산');
+  });
+});

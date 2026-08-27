@@ -28,6 +28,7 @@ const state = {
   depthExceptions: {},
   groundNotes: [],
   noteOptions: [],
+  shortfallReasons: [],
   stale: false,
   previewOffline: false,
   defaults: { labor: [], equipment: [] },
@@ -459,10 +460,10 @@ function renderSummary() {
     </div>
 
     <div class="card">
-      <div class="question">계획심도와 동일합니까?</div>
+      <div class="question">계획심도까지 뚫었습니까?</div>
       <div class="choice">
-        <button id="depthYes" aria-pressed="${state.depthSame === true}">예</button>
-        <button id="depthNo"  aria-pressed="${state.depthSame === false}">아니오</button>
+        <button id="depthYes" aria-pressed="${state.depthSame === true}">다 뚫었다</button>
+        <button id="depthNo"  aria-pressed="${state.depthSame === false}">못 간 공 있다</button>
       </div>
       <div id="depthDetail"></div>
     </div>
@@ -669,27 +670,93 @@ function renderDefaultEditor(kind) {
   });
 }
 
-/** 아니오를 골랐을 때만 나온다. 다른 공은 계획심도를 그대로 쓴다 (§16). */
+/*
+ * '못 간 공 있다' 를 골랐을 때만 나온다 (§16, 사용자 확인 2026-08-27).
+ *
+ * 계획심도는 천공조서에 이미 있다. 현장은 숫자를 다시 적지 않는다.
+ * 못 간 공만 고르고, 어디까지 갔는지와 왜인지를 남긴다.
+ * 실제심도를 안 받으면 그 공이 계획심도까지 간 것으로 잡혀 수량이 부풀려진다.
+ */
 function renderDepthInputs() {
   const s = state.preview;
-  $('#depthDetail').innerHTML = `
-    <p class="muted" style="font-size:17px">다른 공만 적으십시오. 비워두면 계획심도를 씁니다.</p>
-    <div class="rowlist">
-      ${s.today_hole_numbers.map((no) => `
-        <div class="row"><span class="no">${no}</span>
-          <input inputmode="decimal" data-no="${no}" placeholder="m"
-                 value="${state.depthExceptions[no] ?? ''}"></div>`).join('')}
-    </div>`;
-  $('#depthDetail').querySelectorAll('input[data-no]').forEach((i) => {
-    i.onchange = () => {
-      const v = i.value.trim();
-      if (v === '') delete state.depthExceptions[i.dataset.no];
-      else state.depthExceptions[i.dataset.no] = v;
-      const btn = $('#submit');
-      const n = Object.keys(state.depthExceptions).length;
-      btn.textContent = `입력완료${n ? ` (심도 예외 ${n}공)` : ''}`;
+  const box = $('#depthDetail');
+  if (!box) return;
+  const picked = state.depthExceptions;
+
+  box.innerHTML = `
+    <p class="muted" style="font-size:17px;margin-top:12px">
+      계획심도까지 못 간 공만 누르십시오. 누르지 않은 공은 계획심도까지 간 것으로 봅니다.</p>
+    <div class="picker" style="max-height:none">
+      ${s.today_hole_numbers.map((no) => `<button data-short="${no}"
+        aria-pressed="${!!picked[no]}">${no}${picked[no]?.actual_depth_total
+          ? `<br><small>${picked[no].actual_depth_total}m</small>` : ''}</button>`).join('')}
+    </div>
+    <div id="shortDetail"></div>`;
+
+  box.querySelectorAll('button[data-short]').forEach((b) => {
+    b.onclick = () => {
+      const no = b.dataset.short;
+      if (picked[no]) delete picked[no];
+      else picked[no] = { actual_depth_total: '', shortfall_reason: '' };
+      renderDepthInputs();
+      updateSubmitLabel();
     };
   });
+  renderShortfallDetail();
+}
+
+/** 고른 공마다 '어디까지' 와 '왜' 를 받는다. */
+async function renderShortfallDetail() {
+  const box = $('#shortDetail');
+  if (!box) return;
+  const nos = Object.keys(state.depthExceptions);
+  if (nos.length === 0) { box.innerHTML = ''; return; }
+
+  if (state.shortfallReasons.length === 0) {
+    try {
+      const r = await fetchWithCache('shortfallReasons', '/field/shortfall-reasons');
+      state.shortfallReasons = r.data.reasons;
+    } catch { state.shortfallReasons = ['기타']; }
+  }
+
+  box.innerHTML = nos.map((no) => {
+    const e = state.depthExceptions[no];
+    return `
+    <div class="dayrow" style="margin-top:12px">
+      <div class="dayhead">
+        <span class="no">${no}</span>
+        <input class="cnt" inputmode="decimal" data-depth="${no}"
+               placeholder="m" value="${e.actual_depth_total}" aria-label="실제심도">
+      </div>
+      <p class="muted" style="font-size:17px;margin:8px 0 0">왜 못 갔습니까?</p>
+      <div class="picker" style="max-height:none;margin-top:6px">
+        ${state.shortfallReasons.map((r) => `<button data-reason-for="${no}" data-reason="${r}"
+          aria-pressed="${e.shortfall_reason === r}">${r}</button>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  box.querySelectorAll('input[data-depth]').forEach((i) => {
+    i.onchange = () => {
+      state.depthExceptions[i.dataset.depth].actual_depth_total = i.value.trim();
+      updateSubmitLabel();
+    };
+  });
+  box.querySelectorAll('button[data-reason-for]').forEach((b) => {
+    b.onclick = () => {
+      state.depthExceptions[b.dataset.reasonFor].shortfall_reason = b.dataset.reason;
+      renderShortfallDetail();
+      updateSubmitLabel();
+    };
+  });
+}
+
+/** 못 간 공이 있으면 버튼에 몇 공인지 보여준다. */
+function updateSubmitLabel() {
+  const btn = $('#submit');
+  if (!btn) return;
+  const n = Object.keys(state.depthExceptions).length;
+  btn.textContent = `입력완료${n ? ` (계획심도 미달 ${n}공)` : ''}`;
 }
 
 /** 있음을 골랐을 때만 나온다 (§15). 선택지는 현장 지층종류에서 만든다. */
@@ -1397,7 +1464,15 @@ async function submitDaily() {
     submit: true,
   };
   const exceptions = Object.entries(state.depthExceptions)
-    .map(([hole_no, actual_depth_total]) => ({ hole_no, actual_depth_total }));
+    .map(([hole_no, e]) => ({ hole_no, ...e }));
+  // 못 갔다고 골라놓고 심도나 사유를 안 적으면 서버가 거부한다. 여기서 먼저 알려준다.
+  const incomplete = exceptions.filter((e) => !e.actual_depth_total || !e.shortfall_reason);
+  if (incomplete.length) {
+    toast(`${incomplete.map((e) => e.hole_no).join(', ')} 의 실제심도와 사유를 적어 주십시오.`, 4000);
+    const btn = $('#submit');
+    btn.disabled = false; updateSubmitLabel();
+    return;
+  }
   if (exceptions.length) payload.depth_exceptions = exceptions;
   if (state.groundNotes.length) payload.ground_notes = state.groundNotes;
   if (state.laborChanges.length) payload.labor_changes = state.laborChanges;

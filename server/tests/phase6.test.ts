@@ -189,7 +189,8 @@ describe('§16 계획심도와 같으면 다시 입력하지 않는다', () => {
       .send({
         work_date: '2026-08-28', from: 'A-014', to: 'A-020',
         depth_same_as_plan: true,
-        depth_exceptions: [{ hole_no: 'A-016', actual_depth_total: '22.5' }],
+        depth_exceptions: [{ hole_no: 'A-016', actual_depth_total: '22.5',
+                            shortfall_reason: '전석·호박돌' }],
         submit: true,
       });
     expect(res.status).toBe(201);
@@ -211,7 +212,8 @@ describe('§16 계획심도와 같으면 다시 입력하지 않는다', () => {
       .post(`/api/field/sites/${siteId}/daily-work`).set(auth(fieldToken))
       .send({
         work_date: '2026-08-29', from: 'A-021', to: 'A-022',
-        depth_exceptions: [{ hole_no: 'A-099', actual_depth_total: '19' }],
+        depth_exceptions: [{ hole_no: 'A-099', actual_depth_total: '19',
+                            shortfall_reason: '전석·호박돌' }],
       });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('DEPTH_EXCEPTION_NOT_IN_RANGE');
@@ -222,7 +224,8 @@ describe('§16 계획심도와 같으면 다시 입력하지 않는다', () => {
       .post(`/api/field/sites/${siteId}/daily-work`).set(auth(fieldToken))
       .send({
         work_date: '2026-08-29', from: 'A-021', to: 'A-022',
-        depth_exceptions: [{ hole_no: 'A-021', actual_depth_total: '0' }],
+        depth_exceptions: [{ hole_no: 'A-021', actual_depth_total: '0',
+                            shortfall_reason: '전석·호박돌' }],
       });
     expect(res.status).toBe(400);
   });
@@ -454,7 +457,8 @@ describe('§16 심도 예외는 적은 공만 예외다 (회귀)', () => {
       .set(auth(fieldToken)).send({
         work_date: '2026-10-21', from: 'A-070', to: 'A-074',
         depth_same_as_plan: false,
-        depth_exceptions: [{ hole_no: 'A-072', actual_depth_total: '23.4' }],
+        depth_exceptions: [{ hole_no: 'A-072', actual_depth_total: '23.4',
+                            shortfall_reason: '전석·호박돌' }],
         submit: true,
       });
     expect(res.status).toBe(201);
@@ -495,5 +499,99 @@ describe('§16 심도 예외는 적은 공만 예외다 (회귀)', () => {
       return r.rows[0].n as number;
     });
     expect(n).toBe(0);
+  });
+});
+
+/* ============ §16 계획심도 체크 단순화 (사용자 확인 2026-08-27) ============ */
+describe('§16 현장은 계획심도까지 갔는지만 체크한다', () => {
+  it('★ 아무것도 안 하면 전부 계획심도까지 간 것이다', async () => {
+    const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-10-25', from: 'A-085', to: 'A-088', submit: true,
+      });
+    expect(res.status).toBe(201);
+    const rows = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT count(*) FILTER (WHERE d.depth_same_as_plan)::int AS reached,
+                count(*)::int AS total
+           FROM core.daily_work_hole d
+           JOIN core.daily_work w ON w.id = d.daily_work_id
+          WHERE w.site_id=$1 AND w.work_date='2026-10-25'`, [siteId]);
+      return r.rows[0];
+    });
+    expect(rows).toMatchObject({ reached: 4, total: 4 });
+  });
+
+  it('★ 못 간 공은 실제심도와 사유가 둘 다 있어야 한다', async () => {
+    const noReason = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-10-26', from: 'A-090', to: 'A-091',
+        depth_same_as_plan: false,
+        depth_exceptions: [{ hole_no: 'A-090', actual_depth_total: '15' }],
+      });
+    expect(noReason.status).toBe(400);   // 사유가 없다
+
+    const noDepth = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-10-26', from: 'A-090', to: 'A-091',
+        depth_same_as_plan: false,
+        depth_exceptions: [{ hole_no: 'A-090', shortfall_reason: '전석·호박돌' }],
+      });
+    expect(noDepth.status).toBe(400);    // 실제심도가 없다
+  });
+
+  it('★ 둘 다 있으면 저장되고 그 공만 미달로 남는다', async () => {
+    const res = await request(app).post(`/api/field/sites/${siteId}/daily-work`)
+      .set(auth(fieldToken)).send({
+        work_date: '2026-10-26', from: 'A-090', to: 'A-092',
+        depth_same_as_plan: false,
+        depth_exceptions: [{ hole_no: 'A-090', actual_depth_total: '15',
+                             shortfall_reason: '전석·호박돌' }],
+        submit: true,
+      });
+    expect(res.status).toBe(201);
+    const rows = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT h.hole_no, d.depth_same_as_plan, d.actual_depth_total::text AS actual,
+                d.shortfall_reason
+           FROM core.daily_work_hole d
+           JOIN core.daily_work w ON w.id = d.daily_work_id
+           JOIN core.hole_master h ON h.id = d.hole_id
+          WHERE w.site_id=$1 AND w.work_date='2026-10-26' ORDER BY h.sort_key`, [siteId]);
+      return r.rows;
+    });
+    expect(rows[0]).toMatchObject({
+      hole_no: 'A-090', depth_same_as_plan: false, actual: '15.000',
+      shortfall_reason: '전석·호박돌',
+    });
+    for (const r of rows.slice(1)) {
+      expect(r).toMatchObject({ depth_same_as_plan: true, shortfall_reason: null });
+    }
+  });
+
+  it('★ 미달 공의 실적 연장은 계획심도가 아니라 실제심도다 (과다계상 방지)', async () => {
+    const depth = await withSession(HO, async (c) => {
+      const r = await c.query(
+        `SELECT actual_depth_total::text AS d FROM core.hole_master
+          WHERE site_id=$1 AND hole_no='A-090'`, [siteId]);
+      return r.rows[0].d as string;
+    });
+    expect(depth).toBe('15.000');   // 20.000 이 아니다
+  });
+
+  it('사유 선택지를 서버가 내려준다 (시스템이 목록을 강제하지 않는다)', async () => {
+    const res = await request(app).get('/api/field/shortfall-reasons').set(auth(fieldToken));
+    expect(res.status).toBe(200);
+    expect(res.body.reasons).toContain('전석·호박돌');
+    expect(res.body.reasons).toContain('지하수');
+    expect(res.body.reasons).toContain('기타');
+  });
+
+  it('§43 미달을 ERROR 가 아니라 INFO 로 알린다 (미달은 정상적으로 생긴다)', async () => {
+    const res = await request(app).get(`/api/sites/${siteId}/validation`).set(auth(headToken));
+    const issue = res.body.issues.find(
+      (i: { code: string }) => i.code === 'DEPTH_SHORTFALL_SUMMARY');
+    expect(issue.severity).toBe('INFO');
+    expect(issue.message).toContain('전석·호박돌');
   });
 });

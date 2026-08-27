@@ -441,10 +441,21 @@ describe('§46 결정론 및 최종 정합성', () => {
     expect(warns).toHaveLength(0);
   });
 
-  it('현장 최초설정 STEP 6·7 이 완료로 판정된다 (§17)', async () => {
+  it('현장 최초설정 단계가 완료로 판정된다 (§17)', async () => {
+    // 단계 구성은 사용자 확인(2026-08-27)에 따라 '본사 사전 업로드 5종' 기준으로 바뀌었다.
+    // 번호가 아니라 이름으로 찾는다. 번호가 또 바뀌어도 테스트가 흔들리지 않는다.
     const res = await request(app).get(`/api/admin/sites/${siteId}/setup-status`).set(auth(token));
-    const byStep = new Map(res.body.steps.map((s: { step: number; done: boolean }) => [s.step, s.done]));
-    expect(byStep.get(6)).toBe(true);   // 지층종류 생성
-    expect(byStep.get(7)).toBe(true);   // 천공번호별 지반조건
+    const byName = new Map(res.body.steps.map(
+      (s: { step_name: string; done: boolean }) => [s.step_name, s.done]));
+    expect(byName.get('지층종류')).toBe(true);
+    expect(byName.get('천공번호별 지반조건 · 계획심도')).toBe(true);
+  });
+
+  it('★ 현장설정 첫 단계가 본사 사전 업로드 5종이다 (사용자 확인)', async () => {
+    const res = await request(app).get(`/api/admin/sites/${siteId}/setup-status`).set(auth(token));
+    const names = res.body.steps.map((s: { step_name: string }) => s.step_name);
+    expect(names.slice(1, 6)).toEqual([
+      '① 계약내역서', '② 천공조서', '③ 수량산출서', '④ 공내역서', '⑤ 작업도면 (평면도 넘버링)',
+    ]);
   });
 });

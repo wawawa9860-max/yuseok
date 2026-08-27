@@ -421,6 +421,10 @@ describe('§29 계약상대방은 원가에 어떤 경로로도 닿지 않는다
       'core.payment_certificate.submitted_amount',
       'core.payment_certificate_hole.amount',
       'core.payment_certificate_hole.unit_price',
+      // 공별 단가 해석 뷰 — 값의 출처는 계약내역서다 (사용자 확인 2026-08-27)
+      'core.v_hole_price.amount',
+      'core.v_hole_price.price_source',
+      'core.v_hole_price.unit_price',
     ];
     const cols = await withSession(HO, async (c) => {
       const r = await c.query(

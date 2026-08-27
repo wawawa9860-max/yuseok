@@ -102,6 +102,12 @@ const holeTypeInput = z.object({
   code: z.string().min(1).max(20),
   name: z.string().min(1).max(50),
   sort_order: z.number().int().min(0).max(999).default(0),
+  /**
+   * 이 천공종류의 단가가 들어있는 계약내역서 품목코드.
+   * 단가는 천공 한 공 한 공에 붙이지 않는다. 내역서에 있다 (사용자 확인 2026-08-27).
+   * 설계변경이 나면 현재 revision 의 같은 품목코드를 자동으로 따라간다 (§38).
+   */
+  contract_item_code: z.string().max(60).nullish(),
 });
 
 adminSiteRouter.post('/:siteId/hole-types', async (req, res, next) => {
@@ -115,12 +121,15 @@ adminSiteRouter.post('/:siteId/hole-types', async (req, res, next) => {
       const out = [];
       for (const it of items) {
         const r = await c.query(
-          `INSERT INTO core.site_hole_type (site_id, code, name, sort_order)
-           VALUES ($1,$2,$3,$4)
+          `INSERT INTO core.site_hole_type
+             (site_id, code, name, sort_order, contract_item_code)
+           VALUES ($1,$2,$3,$4,$5)
            ON CONFLICT (site_id, code) DO UPDATE
-             SET name = EXCLUDED.name, sort_order = EXCLUDED.sort_order
-           RETURNING id, code, name, sort_order, is_active`,
-          [siteId, it.code, it.name, it.sort_order]);
+             SET name = EXCLUDED.name, sort_order = EXCLUDED.sort_order,
+                 contract_item_code = COALESCE(EXCLUDED.contract_item_code,
+                                               core.site_hole_type.contract_item_code)
+           RETURNING id, code, name, sort_order, is_active, contract_item_code`,
+          [siteId, it.code, it.name, it.sort_order, it.contract_item_code ?? null]);
         out.push(r.rows[0]);
       }
       return out;

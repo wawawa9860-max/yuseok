@@ -18,6 +18,7 @@ const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
 let headToken = '';
 let fieldToken = '';
 let siteId = '';
+let contractId = '';
 let fieldUserId = '';
 
 const progress = (token = fieldToken) =>
@@ -37,17 +38,30 @@ beforeAll(async () => {
     .send({ site_code: 'PHASE10_TEST', site_name: 'PHASE10 공정률·기성 검증현장' });
   siteId = site.body.site.id;
 
+  // 본사가 계약내역서를 먼저 올린다. 단가는 여기 있다 (사용자 확인 2026-08-27).
+  const contract = await request(app).post(`/api/sites/${siteId}/contracts`).set(auth(headToken))
+    .send({
+      contract_no: 'C-2027-001', contract_name: 'RF CIP 흙막이 가시설',
+      counterparty_name: '샘플원도급(주)', original_amount: '120000000',
+    });
+  contractId = contract.body.contract.id;
+  await request(app).post(`/api/contracts/${contractId}/items`).set(auth(headToken))
+    .send({ items: [{ item_code: 'CIP-600', item_name: 'C.I.P 천공 D=600', unit: 'm',
+                      quantity: '2000', unit_price: '50000', sort_order: 1 }] });
+
+  // 천공종류를 내역 품목에 건다. 공마다 단가를 붙이지 않는다.
   await request(app).post(`/api/admin/sites/${siteId}/hole-types`).set(auth(headToken))
-    .send([{ code: 'HPILE', name: 'H-PILE 구간', sort_order: 1 }]);
+    .send([{ code: 'HPILE', name: 'H-PILE 구간', sort_order: 1,
+             contract_item_code: 'CIP-600' }]);
   await request(app).post(`/api/admin/sites/${siteId}/ground-types`).set(auth(headToken))
     .send([{ code: 'G01', name: '토사', sort_order: 1 },
            { code: 'G02', name: '풍화암', sort_order: 2 }]);
-  // 100공 × 20m × 50,000원/m = 공당 1,000,000원, 전체 100,000,000원
+  // 100공 × 20m. 단가는 내역서(50,000/m)에서 온다 → 공당 1,000,000원
   await request(app).post(`/api/admin/sites/${siteId}/holes/bulk`).set(auth(headToken))
     .send({
       spec: { mode: 'RANGE', prefix: 'P-', start: 1, end: 100, digits: 3 },
       hole_type_code: 'HPILE', design_depth_total: '20',
-      contract_quantity: '20', contract_unit: 'm', contract_unit_price: '50000',
+      contract_quantity: '20', contract_unit: 'm',
     });
   await request(app).post(`/api/admin/sites/${siteId}/ground-assignments/apply`)
     .set(auth(headToken)).send({
@@ -86,30 +100,53 @@ describe('§36 공정률', () => {
 
   it('★ 금액 공정률 = 누적 시공 인정금액 ÷ 현재 계약금액', async () => {
     const res = await progress();
-    // 10공 × 20m × 50,000 = 10,000,000 / 100,000,000 = 10%
+    // 10공 × 20m × 50,000(내역서 단가) = 10,000,000
     expect(res.body.amount.earned_amount).toBe('10000000.00');
-    expect(res.body.amount.contract_amount).toBe('100000000.00');
-    expect(res.body.amount.rate).toBe('10.0');
+    expect(res.body.amount.contract_amount).toBe('120000000.00');
+    expect(res.body.amount.rate).toBe('8.3');
   });
 
   it('★ 금액 기준이 무엇인지 숨기지 않는다', async () => {
-    const res = await progress();
-    // 계약이 아직 등록되지 않아 공의 계약금액 합계를 썼다
-    expect(res.body.amount.basis).toBe('HOLE_CONTRACT_AMOUNT');
-  });
-
-  it('계약을 등록하면 계약금액 기준으로 바뀐다', async () => {
-    const made = await request(app).post(`/api/sites/${siteId}/contracts`).set(auth(headToken))
-      .send({
-        contract_no: 'C-2027-001', contract_name: 'RF CIP 흙막이 가시설',
-        counterparty_name: '샘플원도급(주)', original_amount: '120000000',
-      });
-    expect(made.status).toBe(201);
     const res = await progress();
     expect(res.body.amount.basis).toBe('CONTRACT_AMOUNT');
     expect(res.body.amount.contract_amount).toBe('120000000.00');
     // 10,000,000 / 120,000,000 = 8.3%
     expect(res.body.amount.rate).toBe('8.3');
+  });
+
+  it('★ 단가가 계약내역서에서 온다는 사실을 밝힌다 (사용자 확인)', async () => {
+    const res = await progress();
+    const bySource = new Map(res.body.price_sources.map(
+      (s: { source: string; hole_count: number }) => [s.source, s.hole_count]));
+    // 공마다 단가를 붙이지 않았는데도 100공 전부 내역서에서 단가를 받았다
+    expect(bySource.get('CONTRACT_BOQ')).toBe(100);
+    expect(bySource.get('HOLE_OVERRIDE')).toBeUndefined();
+  });
+
+  it('★ 설계변경이 나면 새 단가를 자동으로 따라간다 (§38)', async () => {
+    const before = (await progress()).body.amount.earned_amount;
+    expect(before).toBe('10000000.00');
+
+    const rev = await request(app).post(`/api/contracts/${contractId}/revisions`)
+      .set(auth(headToken)).send({
+        contract_amount: '132000000', reason: '단가 조정', effective_date: '2027-02-01',
+      });
+    expect(rev.status).toBe(201);
+    const revNo = rev.body.revision.revision_no;
+    await request(app).post(`/api/contracts/${contractId}/items`).set(auth(headToken))
+      .send({ revision_no: revNo,
+              items: [{ item_code: 'CIP-600', item_name: 'C.I.P 천공 D=600', unit: 'm',
+                        quantity: '2000', unit_price: '55000', sort_order: 1 }] });
+    await request(app).post(`/api/contracts/${contractId}/revisions/${revNo}/activate`)
+      .set(auth(headToken)).send({});
+
+    // 천공은 하나도 안 건드렸는데 단가가 따라 올라갔다
+    const after = (await progress()).body.amount.earned_amount;
+    expect(after).toBe('11000000.00');   // 10공 × 20m × 55,000
+
+    // 되돌린다
+    await request(app)
+      .post(`/api/contracts/${contractId}/revisions/0/activate`).set(auth(headToken)).send({});
   });
 
   it('§36 보조지표 — 공수 · 천공연장 · 지층별', async () => {
@@ -142,11 +179,19 @@ describe('§36 공정률', () => {
       .send({
         work_date: '2027-01-06', from: 'P-011', to: 'P-012',
         depth_same_as_plan: false,
-        depth_exceptions: [{ hole_no: 'P-011', actual_depth_total: '25' }],
+        depth_exceptions: [{ hole_no: 'P-011', actual_depth_total: '15',
+                             shortfall_reason: '전석·호박돌' }],
         submit: true,
       });
     const res = await progress();
-    expect(res.body.length.completed).toBe('245.000');   // 200 + 25 + 20
+    // 200 + 15(미달) + 20 = 235. 계획심도 20 으로 잡으면 240 이 되어 과다계상된다.
+    expect(res.body.length.completed).toBe('235.000');
+  });
+
+  it('★ 계획심도 미달이 공정률에 그대로 드러난다 (사용자 확인)', async () => {
+    const res = await progress();
+    expect(res.body.depth_shortfall.hole_count).toBe(1);
+    expect(res.body.depth_shortfall.reasons).toEqual(['전석·호박돌']);
   });
 });
 
@@ -179,16 +224,17 @@ describe('§37 기성가능액은 초안이다', () => {
     expect(first.amount).toBe('1000000.00');
   });
 
-  it('★ 계약단가가 없는 공은 0원으로 만들지 않고 알린다', async () => {
+  it('★ 내역 품목이 연결되지 않으면 0원으로 만들지 않고 알린다', async () => {
+    // 천공종류 ↔ 내역 품목 연결을 끊는다. 공은 그대로다.
     await withSession(HO, async (c) => {
       await c.query(
-        `UPDATE core.hole_master SET contract_unit_price=NULL
-          WHERE site_id=$1 AND hole_no='P-012'`, [siteId]);
+        `UPDATE core.site_hole_type SET contract_item_code=NULL WHERE site_id=$1`, [siteId]);
     });
     const res = await draft('2027-01-01', '2027-01-31');
     expect(res.body.issues[0].code).toBe('UNIT_PRICE_NOT_SET');
     expect(res.body.issues[0].severity).toBe('WARN');
-    expect(res.body.draft_amount).toBe('11000000.00');   // 12,000,000 아님
+    expect(res.body.issues[0].message).toContain('계약내역서');
+    expect(res.body.draft_amount).toBe('0');   // 전부 빠진다
 
     const v = await request(app).get(`/api/sites/${siteId}/validation`).set(auth(headToken));
     expect(v.body.issues.map((i: { code: string }) => i.code))
@@ -196,8 +242,24 @@ describe('§37 기성가능액은 초안이다', () => {
 
     await withSession(HO, async (c) => {
       await c.query(
-        `UPDATE core.hole_master SET contract_unit_price=50000
-          WHERE site_id=$1 AND hole_no='P-012'`, [siteId]);
+        `UPDATE core.site_hole_type SET contract_item_code='CIP-600' WHERE site_id=$1`, [siteId]);
+    });
+  });
+
+  it('공별 예외 단가는 내역서보다 우선한다 (드문 경우)', async () => {
+    await withSession(HO, async (c) => {
+      await c.query(
+        `UPDATE core.hole_master SET contract_unit_price=70000
+          WHERE site_id=$1 AND hole_no='P-001'`, [siteId]);
+    });
+    const res = await draft('2027-01-01', '2027-01-31');
+    const p1 = res.body.holes.find((h: { hole_no: string }) => h.hole_no === 'P-001');
+    expect(p1.unit_price).toBe('70000.00');
+    expect(p1.price_source).toBe('HOLE_OVERRIDE');
+    await withSession(HO, async (c) => {
+      await c.query(
+        `UPDATE core.hole_master SET contract_unit_price=NULL
+          WHERE site_id=$1 AND hole_no='P-001'`, [siteId]);
     });
   });
 
@@ -399,5 +461,41 @@ describe('§29 기성은 계약금액이지 내부 원가가 아니다', () => {
     const res = await request(app)
       .get(`/api/progress/sites/${other.body.site.id}/progress`).set(auth(fieldToken));
     expect(res.status).toBe(403);
+  });
+});
+
+/* ============ 단가는 계약내역서에 있다 (사용자 확인 2026-08-27) ============ */
+describe('단가를 천공에 붙이지 않는다', () => {
+  it('★ 천공종류 하나만 바꾸면 그 종류의 모든 공 단가가 바뀐다', async () => {
+    // 공마다 단가를 붙였다면 100공을 전부 고쳐야 한다.
+    await request(app).post(`/api/contracts/${contractId}/items`).set(auth(headToken))
+      .send({ items: [{ item_code: 'CIP-600', item_name: 'C.I.P 천공 D=600', unit: 'm',
+                        quantity: '2000', unit_price: '60000', sort_order: 1 }] });
+    const res = await draft('2027-01-01', '2027-01-31');
+    for (const h of res.body.holes) {
+      expect(h.unit_price).toBe('60000.00');
+      expect(h.price_source).toBe('CONTRACT_BOQ');
+      expect(h.item_code).toBe('CIP-600');
+    }
+    // 되돌린다
+    await request(app).post(`/api/contracts/${contractId}/items`).set(auth(headToken))
+      .send({ items: [{ item_code: 'CIP-600', item_name: 'C.I.P 천공 D=600', unit: 'm',
+                        quantity: '2000', unit_price: '50000', sort_order: 1 }] });
+  });
+
+  it('★ 기성 근거에 어느 내역 품목에서 왔는지 남는다', async () => {
+    const res = await draft('2027-01-01', '2027-01-31');
+    expect(res.body.holes[0].item_name).toBe('C.I.P 천공 D=600');
+    expect(res.body.holes[0].price_source).toBe('CONTRACT_BOQ');
+  });
+
+  it('현장설정에 "천공종류 ↔ 계약내역 품목 연결" 단계가 있다', async () => {
+    const res = await request(app).get(`/api/admin/sites/${siteId}/setup-status`)
+      .set(auth(headToken));
+    const step = res.body.steps.find(
+      (s: { step_name: string }) => s.step_name === '천공종류 ↔ 계약내역 품목 연결');
+    expect(step).toBeDefined();
+    expect(step.done).toBe(true);
+    expect(step.detail).toContain('100 / 100공');
   });
 });

@@ -34,8 +34,22 @@ async function main(): Promise<void> {
     .send({ site_code: SITE_CODE, site_name: '시험현장 RF CIP', client_name: '시험원도급(주)' });
   const id = site.body.site.id as string;
 
+  // 본사 사전 업로드 5종 중 ① 계약내역서 — 단가는 여기 있다 (사용자 확인 2026-08-27)
+  const contract = await request(app).post(`/api/sites/${id}/contracts`).set(auth)
+    .send({
+      contract_no: 'TRIAL-2026-001', contract_name: 'RF CIP 흙막이 가시설',
+      counterparty_name: '시험원도급(주)', original_amount: '60000000',
+    });
+  await request(app).post(`/api/contracts/${contract.body.contract.id}/items`).set(auth)
+    .send({ items: [
+      { item_code: 'CIP-600', item_name: 'C.I.P 천공 D=600', spec: 'D=600',
+        unit: 'm', quantity: '1200', unit_price: '50000', sort_order: 1 },
+    ] });
+
+  // 천공종류를 내역 품목에 건다. 공마다 단가를 붙이지 않는다.
   await request(app).post(`/api/admin/sites/${id}/hole-types`).set(auth)
-    .send([{ code: 'HPILE', name: 'H-PILE 구간', sort_order: 1 }]);
+    .send([{ code: 'HPILE', name: 'H-PILE 구간', sort_order: 1,
+             contract_item_code: 'CIP-600' }]);
   await request(app).post(`/api/admin/sites/${id}/ground-types`).set(auth)
     .send([
       { code: 'G01', name: '토사', sort_order: 1 },
@@ -47,8 +61,6 @@ async function main(): Promise<void> {
       spec: { mode: 'RANGE', prefix: 'A-', start: 1, end: 60, digits: 3 },
       hole_type_code: 'HPILE', assign_drawing_sequence: true,
       design_depth_total: '20', contract_quantity: '20', contract_unit: 'm',
-      // 계약단가가 없으면 금액 공정률과 기성이 계속 0 으로만 보여 시험이 안 된다.
-      contract_unit_price: '50000',
     });
   await request(app).post(`/api/admin/sites/${id}/ground-assignments/apply`).set(auth)
     .send({
