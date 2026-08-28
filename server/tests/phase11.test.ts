@@ -75,19 +75,30 @@ beforeAll(async () => {
 
 /* ============================================================ §31 등록 */
 describe('§31 특이사항 등록 — ERP 가 아니라 한 장의 기록', () => {
-  it('유형 선택지 17종을 서버가 내려준다', async () => {
+  it('★ 유형 선택지 — 사용자 확인 8종 그대로', async () => {
     const res = await request(app).get('/api/events/event-types').set(auth(fieldToken));
     expect(res.status).toBe(200);
-    expect(res.body.event_types).toHaveLength(17);
-    for (const t of ['레미콘 지연', '지반조건 변화', '슬라임', 'H-BEAM', '우천', '기타']) {
-      expect(res.body.event_types).toContain(t);
-    }
+    expect(res.body.event_types).toEqual([
+      '소음 민원발생', '진동 민원발생', '레미콘 수급 지연', '가설휀스 간섭',
+      '작업부지 미조성', '검측지연', '지반조건 상이', '기타',
+    ]);
+  });
+
+  it('★ 기타는 내용 없이 저장할 수 없다 (기타=입력)', async () => {
+    const noMemo = await request(app).post(`/api/events/sites/${siteId}/events`)
+      .set(auth(fieldToken)).send({ event_type: '기타' });
+    expect(noMemo.status).toBe(400);
+    expect(noMemo.body.error).toBe('ETC_NEEDS_MEMO');
+
+    const withMemo = await request(app).post(`/api/events/sites/${siteId}/events`)
+      .set(auth(fieldToken)).send({ event_type: '기타', memo: '인접 공사장 크레인 간섭' });
+    expect(withMemo.status).toBe(201);
   });
 
   it('★ 현장관리자가 사건을 등록한다 — §32 번호가 자동으로 붙는다', async () => {
     const res = await request(app).post(`/api/events/sites/${siteId}/events`)
       .set(auth(fieldToken)).send({
-        event_date: '2027-02-01', event_type: '지반조건 변화',
+        event_date: '2027-02-01', event_type: '지반조건 상이',
         title: 'E-003 부근 전석층 출현',
         memo: '천공조서와 달리 GL-13m 부터 전석. 관입 불가.',
         needs_review: true,
@@ -102,13 +113,13 @@ describe('§31 특이사항 등록 — ERP 가 아니라 한 장의 기록', () 
 
   it('번호는 현장·연도별 순번이다', async () => {
     const res = await request(app).post(`/api/events/sites/${siteId}/events`)
-      .set(auth(fieldToken)).send({ event_date: '2027-02-02', event_type: '우천' });
+      .set(auth(fieldToken)).send({ event_date: '2027-02-02', event_type: '검측지연' });
     expect(res.body.event.event_no).toBe('EV-2027-0002');
   });
 
   it('★ 동시에 등록해도 번호가 겹치지 않는다', async () => {
     const send = () => request(app).post(`/api/events/sites/${siteId}/events`)
-      .set(auth(fieldToken)).send({ event_date: '2027-02-03', event_type: '기타' });
+      .set(auth(fieldToken)).send({ event_date: '2027-02-03', event_type: '기타', memo: '동시등록 시험' });
     const results = await Promise.all([send(), send(), send()]);
     const nos = results.map((r) => r.body.event.event_no);
     expect(new Set(nos).size).toBe(3);
@@ -117,7 +128,7 @@ describe('§31 특이사항 등록 — ERP 가 아니라 한 장의 기록', () 
   it('도면에 없는 천공번호는 조용히 버리지 않고 알려준다 (§8)', async () => {
     const res = await request(app).post(`/api/events/sites/${siteId}/events`)
       .set(auth(fieldToken)).send({
-        event_type: '추가천공', hole_nos: ['E-001', 'X-999'],
+        event_type: '작업부지 미조성', hole_nos: ['E-001', 'X-999'],
       });
     expect(res.body.linked_holes).toEqual(['E-001']);
     expect(res.body.unknown_holes).toEqual(['X-999']);
@@ -151,11 +162,11 @@ describe('§31 사진 / 음성메모 연결', () => {
     expect(vis).toBe('SITE');   // 원가가 아니다. 본사전용으로 숨기지 않는다.
   });
 
-  it('음성메모도 붙는다', async () => {
+  it('★ 음성메모는 받지 않는다 (사용자 확인 — 회의는 회의록으로)', async () => {
     const res = await request(app).post(`/api/events/${eventId}/files`)
       .set(auth(fieldToken)).attach('file', Buffer.from('fake-audio'), 'memo.m4a');
-    expect(res.status).toBe(201);
-    expect(res.body.category).toBe('VOICE_MEMO');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('UNSUPPORTED_FILE');
   });
 
   it('허용되지 않는 파일은 거부한다', async () => {
@@ -176,9 +187,9 @@ describe('§31 통합 — 일일입력이 받은 예외를 재입력시키지 �
 
     const ev = res.body.events.find(
       (e: { event_no: string }) => e.event_no === 'EV-2027-0001');
-    expect(ev.event_type).toBe('지반조건 변화');
+    expect(ev.event_type).toBe('지반조건 상이');
     expect(ev.hole_numbers).toEqual(['E-003', 'E-004']);
-    expect(ev.files).toHaveLength(2);   // 사진 + 음성
+    expect(ev.files).toHaveLength(1);   // 사진
 
     const d = res.body.from_daily_input;
     expect(d.ready_mix_delay[0]).toMatchObject({ delay_minutes: 90, delay_reason: '레미콘공장' });
@@ -247,7 +258,8 @@ describe('§32 변경/정산 검토', () => {
 
   it('현장관리자는 종결할 수 없다', async () => {
     const made = await request(app).post(`/api/events/sites/${siteId}/events`)
-      .set(auth(fieldToken)).send({ event_type: '기타', needs_review: true });
+      .set(auth(fieldToken)).send({ event_type: '기타', memo: '종결권한 확인용',
+                                    needs_review: true });
     const res = await request(app).patch(`/api/events/${made.body.event.id}`)
       .set(auth(fieldToken)).send({ status: 'CLOSED' });
     expect(res.status).toBe(403);
@@ -260,7 +272,7 @@ describe('권한', () => {
     const other = await request(app).post('/api/admin/sites').set(auth(headToken))
       .send({ site_code: 'PHASE11_OTHER', site_name: '배정 안 된 현장' });
     const res = await request(app).post(`/api/events/sites/${other.body.site.id}/events`)
-      .set(auth(fieldToken)).send({ event_type: '기타' });
+      .set(auth(fieldToken)).send({ event_type: '검측지연' });
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
 

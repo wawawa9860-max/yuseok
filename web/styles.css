@@ -176,3 +176,13 @@ table.register td.bad { color: var(--danger); font-weight: 700; }
 .bignum .unit { font-size: 22px; font-weight: 700; color: var(--muted); margin-left: 4px; }
 .bar { height: 14px; background: var(--line); border-radius: 999px; overflow: hidden; margin-bottom: 12px; }
 .bar span { display: block; height: 100%; background: var(--primary); border-radius: 999px; }
+
+/* 본사 대시보드 (§39) — 현장별 한 줄, 이상현장만 표시 */
+.sitecard { cursor: pointer; }
+.sitecard.flagged { border-left: 6px solid var(--warn); }
+.siterow { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.flagline { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+.flag {
+  background: #fef3c7; color: var(--warn); border-radius: 999px;
+  padding: 4px 12px; font-size: 16px; font-weight: 700;
+}

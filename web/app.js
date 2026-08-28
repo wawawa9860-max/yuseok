@@ -35,6 +35,7 @@ const state = {
   laborSame: null, laborChanges: [],
   equipSame: null, equipChanges: [],
   readyMix: null,
+  dashboard: null,     // §39 본사 대시보드
   events: null,        // §31 특이사항
   eventTypes: [],
   newEvent: null,
@@ -800,6 +801,124 @@ async function renderGroundOptions() {
   });
 }
 
+/* ------------------------------------------- §39 본사 대시보드 (PHASE 12) */
+/*
+ * 현장별 한 줄. 이상현장에만 표시가 붙고, 그것만 눌러 상세를 본다.
+ * 원가 합계는 상세에서만 나온다 (§29 — 이 화면 전체가 본사 전용이다).
+ */
+async function openDashboard() {
+  let d;
+  try { d = await api('/admin/dashboard'); }
+  catch (e) { toast(e.message); return renderLogin(e.message); }
+  state.dashboard = d;
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const d = state.dashboard;
+  const rows = [...d.sites].sort((a, b) => b.flags.length - a.flags.length);
+
+  app.innerHTML = `
+    <header class="site">
+      <h1>본사 대시보드</h1>
+      <div class="date">${dateLabel(d.as_of)} · ${rows.length}개 현장</div>
+    </header>
+
+    ${rows.map((s) => `
+    <div class="card sitecard ${s.flags.length ? 'flagged' : ''}" data-site="${s.site_id}">
+      <div class="siterow">
+        <div>
+          <b>${s.site_name}</b><br>
+          <small class="muted">금일 ${s.today_holes}공 · ${num(s.today_man_days)}공수
+            ${s.ready_mix_m3 ? ` · 레미콘 ${num(s.ready_mix_m3)}㎥` : ''}</small>
+        </div>
+        <div class="num">
+          <b>${num(s.progress_rate)}%</b><br>
+          <small class="muted">${s.completed_holes}/${s.total_holes}공</small>
+        </div>
+      </div>
+      <div class="siterow">
+        <small class="muted">증빙 ${s.evidence.verified}/${s.evidence.total}
+          ${s.payment ? ` · 기성 ${s.payment.sequence_no}회차 ${
+            { DRAFT: '작성중', SUBMITTED: '제출', APPROVED: '승인', REJECTED: '반려' }[s.payment.status]}` : ''}
+          ${s.open_events ? ` · 특이사항 ${s.open_events}건` : ''}</small>
+      </div>
+      ${s.flags.length ? `<div class="flagline">${s.flags.map((f) =>
+        `<span class="flag">${f}</span>`).join('')}</div>` : ''}
+    </div>`).join('')}
+
+    <button class="ghost" id="dashLogout">로그아웃</button>`;
+
+  app.querySelectorAll('[data-site]').forEach((el) => {
+    el.onclick = () => openDashboardSite(el.dataset.site);
+  });
+  $('#dashLogout').onclick = () => { logout(); renderLogin(); };
+}
+
+/** 이상현장 클릭 → 상세. §29 원가 합계는 여기서만 나온다. */
+async function openDashboardSite(siteId) {
+  let d;
+  try { d = await api(`/admin/dashboard/sites/${siteId}`); }
+  catch (e) { toast(e.message); return; }
+  const site = state.dashboard.sites.find((s) => s.site_id === siteId);
+  const p = d.progress;
+  const sev = { ERROR: 'error', WARN: 'warn', INFO: 'ok' };
+
+  app.innerHTML = `
+    <header class="site">
+      <h1>${site?.site_name ?? '현장 상세'}</h1>
+      <div class="date">${dateLabel(d.as_of)}</div>
+    </header>
+
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><div class="label">물량 공정률</div>
+          <div class="value">${num(p.quantity.rate)}<span class="unit">%</span></div></div>
+        <div class="stat"><div class="label">금액 공정률</div>
+          <div class="value">${num(p.amount.rate)}<span class="unit">%</span></div></div>
+      </div>
+      <table class="summary">
+        <tr><td>시공 인정금액</td><td class="num">${won(p.amount.earned_amount)}</td></tr>
+        <tr><td>계약금액</td><td class="num">${won(p.amount.contract_amount)}</td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>이번달 투입원가 (본사 전용)</h2>
+      <div class="bignum">${won(d.cost.total)}</div>
+      <table class="summary">
+        ${d.cost.by_type.map((t) =>
+          `<tr><td>${t.name_ko} (${t.count}건)</td><td class="num">${won(t.amount)}</td></tr>`).join('')}
+        <tr><td><b>시공 인정금액 대비</b></td>
+            <td class="num"><b>${Number(d.cost.earned_amount) > 0
+              ? num(Number(d.cost.total) / Number(d.cost.earned_amount) * 100) + '%'
+              : '-'}</b></td></tr>
+      </table>
+      <p class="muted" style="font-size:17px">이 칸은 본사에게만 보입니다 (§29).</p>
+    </div>
+
+    ${d.validation.length ? `
+    <div class="card">
+      <h2>검증</h2>
+      ${d.validation.slice(0, 10).map((v) =>
+        `<div class="notice ${sev[v.severity] ?? 'warn'}">[${v.severity}] ${v.message}</div>`).join('')}
+    </div>` : ''}
+
+    ${d.events.events.length ? `
+    <div class="card">
+      <h2>특이사항</h2>
+      <table class="summary">
+        ${d.events.events.slice(0, 10).map((e) => `
+          <tr><td>${e.event_no}${e.needs_review ? ' <b style="color:var(--warn)">검토</b>' : ''}<br>
+                <small class="muted">${String(e.event_date).slice(0, 10)} · ${e.event_type}</small></td>
+              <td class="num">${e.title ?? e.memo ?? ''}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    <button class="ghost" id="backDash">대시보드로</button>`;
+  $('#backDash').onclick = () => renderDashboard();
+}
+
 /* ------------------------------------------------ §31 특이사항 (PHASE 11) */
 /*
  * ERP 가 아니다. 유형 하나 고르고, 필요하면 번호를 누르고, 사진을 찍는다.
@@ -904,7 +1023,7 @@ function renderEventDetail() {
   box.innerHTML = `
     <div class="card">
       <div class="question">${ev.event_type}</div>
-      <label class="field"><span class="label">내용 (선택)</span>
+      <label class="field"><span class="label">내용${ev.event_type === '기타' ? ' (기타는 꼭 적어 주십시오)' : ' (선택)'}</span>
         <textarea id="evMemo" rows="2">${ev.memo}</textarea></label>
 
       <p class="muted" style="font-size:17px">관련 천공번호 (선택 — 오늘 작업분)</p>
@@ -958,6 +1077,10 @@ function renderEventDetail() {
 
 async function saveEvent() {
   const ev = state.newEvent;
+  if (ev.event_type === '기타' && !ev.memo) {
+    toast('기타를 고르셨으면 내용을 적어 주십시오.');
+    return;
+  }
   const btn = $('#evSave');
   btn.disabled = true; btn.textContent = '저장 중…';
 
@@ -1755,6 +1878,8 @@ async function boot() {
 
   try {
     state.user = me.user; state.sites = me.sites;
+    // §39 본사는 현장 화면이 아니라 대시보드를 본다
+    if (state.user?.role === 'HEAD_OFFICE') return openDashboard();
     if (state.sites.length === 0) return renderLogin('배정된 현장이 없습니다.');
     if (!state.siteId || !state.sites.some((s) => s.id === state.siteId)) {
       if (state.sites.length === 1) {

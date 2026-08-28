@@ -26,10 +26,8 @@ eventRouter.use(requireAuth);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STORAGE_ROOT = resolve(HERE, '../..', env.STORAGE_LOCAL_ROOT);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024 } });
-/** 사진 + 음성메모 (§31) */
-const ALLOWED = new Set(['.jpg', '.jpeg', '.png', '.heic', '.webp', '.pdf',
-                         '.m4a', '.mp3', '.aac', '.wav', '.ogg', '.webm', '.3gp', '.amr']);
-const AUDIO = new Set(['.m4a', '.mp3', '.aac', '.wav', '.ogg', '.webm', '.3gp', '.amr']);
+/** 사진·PDF 만. 음성메모는 쓰지 않는다 (사용자 확인 2026-08-28 — 회의는 회의록으로). */
+const ALLOWED = new Set(['.jpg', '.jpeg', '.png', '.heic', '.webp', '.pdf']);
 
 const uuid = z.string().uuid();
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '날짜 형식은 YYYY-MM-DD 입니다.');
@@ -64,6 +62,9 @@ eventRouter.post('/sites/:siteId/events', async (req, res, next) => {
     const p = eventInput.safeParse(req.body);
     if (!p.success) throw badRequest(p.error.issues[0]?.message ?? '특이사항 정보가 올바르지 않습니다.');
     const d = p.data;
+    if (d.event_type === '기타' && !d.memo && !d.title) {
+      throw badRequest('기타를 고르셨으면 내용을 적어 주십시오.', 'ETC_NEEDS_MEMO');
+    }
     const date = d.event_date ?? new Date().toISOString().slice(0, 10);
     const reqId = requestId(req);
 
@@ -120,7 +121,7 @@ eventRouter.post('/:eventId/files', upload.single('file'), async (req, res, next
     if (!file) throw badRequest('파일이 필요합니다.', 'FILE_REQUIRED');
     const ext = extname(file.originalname).toLowerCase();
     if (!ALLOWED.has(ext)) {
-      throw badRequest('사진, PDF 또는 음성메모만 올릴 수 있습니다.', 'UNSUPPORTED_FILE');
+      throw badRequest('사진 또는 PDF 만 올릴 수 있습니다.', 'UNSUPPORTED_FILE');
     }
 
     const result = await withSession(req.actor!, async (c) => {
@@ -130,7 +131,7 @@ eventRouter.post('/:eventId/files', upload.single('file'), async (req, res, next
       const siteId = ev.rows[0]!.site_id as string;
 
       const checksum = createHash('sha256').update(file.buffer).digest('hex');
-      const category = AUDIO.has(ext) ? 'VOICE_MEMO' : 'FIELD_PHOTO';
+      const category = 'FIELD_PHOTO';
       const key = `site/${siteId}/event/${checksum}${ext}`;
       const fullPath = join(STORAGE_ROOT, key);
       await mkdir(dirname(fullPath), { recursive: true });
