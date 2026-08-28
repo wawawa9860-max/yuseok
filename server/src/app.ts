@@ -15,6 +15,7 @@ import { fieldRouter } from './routes/field-daily.js';
 import { costAdminRouter, costRouter } from './routes/cost.js';
 import { reportRouter } from './routes/reports.js';
 import { paymentAdminRouter, progressRouter } from './routes/payment.js';
+import { eventRouter } from './routes/events.js';
 import { HttpError } from './http/errors.js';
 import { logAccessDenied } from './http/context.js';
 
@@ -42,6 +43,7 @@ export function createApp() {
   app.use('/api/field', fieldRouter);
   app.use('/api/reports', reportRouter);
   app.use('/api/progress', progressRouter);
+  app.use('/api/events', eventRouter);
   app.use('/api/admin/payment', paymentAdminRouter);
   app.use('/api/cost', costRouter);
   app.use('/api/admin/cost', costAdminRouter);

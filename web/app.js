@@ -35,6 +35,9 @@ const state = {
   laborSame: null, laborChanges: [],
   equipSame: null, equipChanges: [],
   readyMix: null,
+  events: null,        // §31 특이사항
+  eventTypes: [],
+  newEvent: null,
   progress: null,      // §36 공정률
   payments: null,      // §37 기성
   register: null,      // §34 천공조서
@@ -146,6 +149,15 @@ async function fetchWithCache(name, path) {
 /* -------------------------------------------------------- 오프라인 큐 */
 /** 큐에 쌓인 항목을 서버로 보낸다. */
 async function sendQueued(item, done) {
+  if (item.kind === 'event-file') {
+    const eventId = item.event_id || done?.get(item.after)?.event?.id;
+    if (!eventId) {
+      const err = new Error('특이사항 저장을 기다립니다.');
+      err.offline = true;
+      throw err;
+    }
+    return apiUpload(`/events/${eventId}/files`, item.file, item.filename);
+  }
   // 영수증 사진은 비용이 먼저 저장돼야 붙일 수 있다.
   if (item.kind === 'evidence') {
     // 비용이 이미 저장돼 있으면 그 id 를, 아니면 방금 보낸 비용의 응답에서 찾는다.
@@ -289,7 +301,7 @@ async function openMain() {
     <button id="goRegister">천공조서 / 천공일지</button>
     <button id="goCost">비용 · 증빙</button>
     <button id="goProgress">공정률 / 기성</button>
-    <button class="later" disabled>특이사항 · 준비중</button>
+    <button id="goEvents">특이사항</button>
     <button id="goReport">오늘 보고서</button>
     <button class="later" disabled>카카오톡 공유 · 준비중</button>
     <div class="spacer"></div>
@@ -307,6 +319,7 @@ async function openMain() {
   $('#goCost').onclick = openCost;
   $('#goRegister').onclick = () => openRegister();
   $('#goProgress').onclick = openProgress;
+  $('#goEvents').onclick = openEvents;
   // openReport(date) 라서 그대로 넘기면 클릭 이벤트가 날짜 자리에 들어간다
   $('#goReport').onclick = () => openReport();
   $('#switchSite').onclick = () => {
@@ -785,6 +798,219 @@ async function renderGroundOptions() {
       renderSummary();
     };
   });
+}
+
+/* ------------------------------------------------ §31 특이사항 (PHASE 11) */
+/*
+ * ERP 가 아니다. 유형 하나 고르고, 필요하면 번호를 누르고, 사진을 찍는다.
+ *
+ * 레미콘 지연·장비대기·계획심도 미달·지반 특이사항은 일일입력이 이미 받았다.
+ * 여기서 다시 묻지 않는다 (§1-2). 아래 목록이 그것들을 모아서 함께 보여준다.
+ */
+async function openEvents() {
+  let data, types;
+  try {
+    const [a, b] = await Promise.all([
+      fetchWithCache('events', `/events/sites/${state.siteId}/events`),
+      fetchWithCache('eventTypes', '/events/event-types'),
+    ]);
+    data = a.data; types = b.data.event_types; state.stale = a.stale;
+  } catch (e) { toast(e.message); return; }
+  state.events = data;
+  state.eventTypes = types;
+  state.newEvent = null;
+  renderEvents();
+}
+
+function renderEvents() {
+  const d = state.events;
+  const auto = d.from_daily_input;
+  const autoRows = [
+    ...auto.depth_shortfall.map((x) => ({
+      date: x.work_date, label: `계획심도 미달 · ${x.hole_no}`,
+      detail: `${num(x.actual_depth)}/${num(x.design_depth)}m · ${x.reason}` })),
+    ...auto.ready_mix_delay.map((x) => ({
+      date: x.work_date, label: '레미콘 지연',
+      detail: `${x.delay_minutes}분 · ${x.delay_reason ?? ''}` })),
+    ...auto.equipment_idle.map((x) => ({
+      date: x.work_date, label: `장비 ${Number(x.operating_days) === 0 ? '대기' : '반일'} · ${x.equipment_name}`,
+      detail: x.idle_reason ?? '' })),
+    ...auto.ground_notes.map((x) => ({
+      date: x.work_date, label: `지반 · ${x.note_type}`,
+      detail: `${x.memo ?? ''} ${x.hole_numbers.join(', ')}`.trim() })),
+  ].sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  app.innerHTML = `
+    <header class="site">
+      <h1>특이사항</h1>
+      <div class="date">${state.today.site.site_name}</div>
+    </header>
+
+    ${state.stale ? '<div class="notice warn">통신이 안 되어 마지막으로 받은 내용을 보여줍니다.</div>' : ''}
+
+    <div class="card">
+      <div class="question">무슨 일이 있었습니까?</div>
+      <div class="picker" style="max-height:none">
+        ${state.eventTypes.map((t) => `<button data-type="${t}"
+          aria-pressed="${state.newEvent?.event_type === t}">${t}</button>`).join('')}
+      </div>
+    </div>
+    <div id="eventDetail"></div>
+
+    ${d.events.length ? `
+    <div class="card">
+      <h2>등록된 특이사항</h2>
+      <table class="summary">
+        ${d.events.slice(0, 15).map((e) => `
+          <tr><td>${e.event_no}${e.needs_review ? ' <b style="color:var(--warn)">검토</b>' : ''}<br>
+                <small class="muted">${String(e.event_date).slice(0, 10)} · ${e.event_type}</small></td>
+              <td class="num">${e.title ?? e.memo ?? ''}${e.hole_numbers.length
+                ? `<br><small class="muted">${e.hole_numbers.join(', ')}</small>` : ''}
+                ${e.files.length ? `<br><small class="muted">첨부 ${e.files.length}건</small>` : ''}
+                ${e.status === 'CLOSED' ? '<br><small class="muted">종결</small>' : ''}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    ${autoRows.length ? `
+    <div class="card">
+      <h2>일일입력에서 모은 특이사항</h2>
+      <p class="muted" style="font-size:17px">이미 입력하신 내용입니다. 다시 적을 필요 없습니다.</p>
+      <table class="summary">
+        ${autoRows.slice(0, 15).map((r) => `
+          <tr><td>${r.label}<br><small class="muted">${String(r.date).slice(0, 10)}</small></td>
+              <td class="num">${r.detail}</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
+
+    <button class="ghost" id="back">돌아가기</button>`;
+
+  app.querySelectorAll('button[data-type]').forEach((b) => {
+    b.onclick = () => {
+      state.newEvent = { event_type: b.dataset.type, hole_nos: [], memo: '', file: null };
+      renderEvents();
+    };
+  });
+  $('#back').onclick = openMain;
+  if (state.newEvent) renderEventDetail();
+}
+
+/** 유형을 고른 다음에만 나온다. */
+function renderEventDetail() {
+  const box = $('#eventDetail');
+  const ev = state.newEvent;
+  const holes = (state.today?.today_holes ?? []).map?.((h) => h.hole_no)
+    ?? [];
+
+  box.innerHTML = `
+    <div class="card">
+      <div class="question">${ev.event_type}</div>
+      <label class="field"><span class="label">내용 (선택)</span>
+        <textarea id="evMemo" rows="2">${ev.memo}</textarea></label>
+
+      <p class="muted" style="font-size:17px">관련 천공번호 (선택 — 오늘 작업분)</p>
+      <div class="picker" style="max-height:26vh" id="evHoles"></div>
+
+      <input id="evPhoto" type="file" accept="image/*" capture="environment" hidden>
+      <button class="ghost" id="evTakePhoto">${ev.file ? '사진 1장 · 다시 찍기' : '사진 찍기'}</button>
+
+      <label class="field" style="display:flex;align-items:center;gap:12px">
+        <input id="evReview" type="checkbox" style="width:28px;height:28px"
+               ${ev.needs_review ? 'checked' : ''}>
+        <span>설계변경·정산 검토가 필요합니다</span></label>
+
+      <button class="primary" id="evSave">저장</button>
+    </div>`;
+
+  // 오늘 작업분 + 미시공 앞쪽 번호를 후보로 보여준다
+  (async () => {
+    let nos = [];
+    try {
+      const t = await fetchWithCache('today', `/field/sites/${state.siteId}/today`);
+      nos = (t.data.today_holes ?? []).map((h) => h.hole_no);
+    } catch { /* 캐시 없음 */ }
+    if (nos.length === 0) {
+      try {
+        const l = await fetchWithCache('holes', `/sites/${state.siteId}/holes?status=NOT_STARTED&limit=1000`);
+        nos = l.data.holes.slice(0, 30).map((h) => h.hole_no);
+      } catch { /* 통신 불가 */ }
+    }
+    const el = $('#evHoles');
+    if (!el) return;
+    el.innerHTML = nos.map((no) => `<button data-hole="${no}"
+      aria-pressed="${ev.hole_nos.includes(no)}">${no}</button>`).join('')
+      || '<p class="muted" style="font-size:17px">오늘 작업분이 없습니다.</p>';
+    el.querySelectorAll('button[data-hole]').forEach((b) => {
+      b.onclick = () => {
+        const no = b.dataset.hole;
+        const i = ev.hole_nos.indexOf(no);
+        if (i >= 0) ev.hole_nos.splice(i, 1); else ev.hole_nos.push(no);
+        b.setAttribute('aria-pressed', String(i < 0));
+      };
+    });
+  })();
+
+  $('#evMemo').onchange = () => { ev.memo = $('#evMemo').value.trim(); };
+  $('#evReview').onchange = () => { ev.needs_review = $('#evReview').checked; };
+  $('#evTakePhoto').onclick = () => $('#evPhoto').click();
+  $('#evPhoto').onchange = () => { ev.file = $('#evPhoto').files[0] ?? null; renderEventDetail(); };
+  $('#evSave').onclick = saveEvent;
+}
+
+async function saveEvent() {
+  const ev = state.newEvent;
+  const btn = $('#evSave');
+  btn.disabled = true; btn.textContent = '저장 중…';
+
+  const payload = { event_type: ev.event_type, event_date: state.today.date };
+  if (ev.memo) payload.memo = ev.memo;
+  if (ev.hole_nos.length) payload.hole_nos = ev.hole_nos;
+  if (ev.needs_review) payload.needs_review = true;
+  const requestId = newRequestId();
+
+  try {
+    const saved = await api(`/events/sites/${state.siteId}/events`, {
+      method: 'POST',
+      headers: { 'X-Client-Request-Id': requestId },
+      body: JSON.stringify(payload),
+    });
+    if (ev.file) {
+      try {
+        await apiUpload(`/events/${saved.event.id}/files`, ev.file, ev.file.name || 'photo.jpg');
+      } catch (e) {
+        if (e.offline) {
+          await enqueue({
+            id: newRequestId(), request_id: newRequestId(), queued_at: Date.now() + 1,
+            kind: 'event-file', event_id: saved.event.id,
+            file: ev.file, filename: ev.file.name || 'photo.jpg', label: '특이사항 사진',
+          });
+          state.pending = await pendingCount();
+        } else toast(`사진을 올리지 못했습니다: ${e.message}`, 4000);
+      }
+    }
+    toast(`${saved.event.event_no} 저장했습니다.`);
+    await openEvents();
+  } catch (e) {
+    if (e.offline) {
+      await enqueue({
+        id: requestId, request_id: requestId, queued_at: Date.now(),
+        kind: 'event', path: `/events/sites/${state.siteId}/events`, payload,
+        label: `특이사항 ${ev.event_type}`,
+      });
+      if (ev.file) {
+        await enqueue({
+          id: newRequestId(), request_id: newRequestId(), queued_at: Date.now() + 1,
+          kind: 'event-file', after: requestId,
+          file: ev.file, filename: ev.file.name || 'photo.jpg', label: '특이사항 사진',
+        });
+      }
+      state.pending = await pendingCount();
+      toast('통신이 안 되어 저장 대기로 넘겼습니다. 통신되면 자동으로 보냅니다.', 4000);
+      await openMain();
+    } else {
+      toast(e.message);
+      btn.disabled = false; btn.textContent = '저장';
+    }
+  }
 }
 
 /* ------------------------------------------ §36 공정률 / §37 기성 (PHASE 10) */
