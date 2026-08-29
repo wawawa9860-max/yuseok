@@ -17,6 +17,8 @@ import { withSession, type SessionClient } from '../db/pool.js';
 import { badRequest, notFound } from '../http/errors.js';
 import { requireAuth } from '../http/context.js';
 import { claim, findStored, remember, requestId } from '../http/idempotency.js';
+import { compressHoleNumbers } from '../domain/holeRange.js';
+import { internalMessage, type ShareStatus, type EvidenceCounts } from '../domain/kakaoMessage.js';
 
 export const fieldRouter = Router();
 fieldRouter.use(requireAuth);
@@ -640,6 +642,38 @@ fieldRouter.get('/shortfall-reasons', requireAuth, async (req, res, next) => {
       return r.rows as { reason: string }[];
     });
     res.json({ reasons: rows.map((x) => x.reason) });
+  } catch (e) { next(e); }
+});
+
+/**
+ * §40 본사 보고용 카카오톡 메시지 (PHASE 14).
+ * 일일입력을 마친 현장관리자가 본사 방에 붙여넣는다.
+ * 본사전용 블록에는 건수만 들어간다 — "내부 원가의 구체적인 금액을 직접 넣지 않는다".
+ * 증빙 건수는 §52 대로 현장관리자도 볼 수 있는 값이다.
+ */
+fieldRouter.get('/sites/:siteId/kakao-message', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const q = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() })
+      .safeParse(req.query);
+    if (!q.success) throw badRequest('날짜가 올바르지 않습니다.');
+    const date = q.data.date ?? new Date().toISOString().slice(0, 10);
+
+    const out = await withSession(req.actor!, async (c) => {
+      const status = (await c.query('SELECT share.fn_daily_status($1,$2) AS d',
+        [siteId, date])).rows[0]!.d as ShareStatus & { today_hole_numbers: string[] };
+      const ev = (await c.query(
+        'SELECT * FROM private_cost.fn_evidence_rate($1,$2,$3)',
+        [siteId, `${date.slice(0, 8)}01`, date])).rows[0] as EvidenceCounts;
+      return { status, ev };
+    });
+
+    const base = `${req.protocol}://${req.get('host')}`;
+    const range = compressHoleNumbers(out.status.today_hole_numbers);
+    res.json({
+      message: internalMessage(out.status, range, out.ev,
+        `${base}/app/`, `${base}/app/`),
+    });
   } catch (e) { next(e); }
 });
 

@@ -69,8 +69,8 @@ beforeAll(async () => {
     .send({ work_date: '2027-03-02', next_day_plan: 'S-045부터 진행예정' });
   // 내부 사건 (외부에 나가면 안 된다) + 내부 비용
   await request(app).post(`/api/events/sites/${siteId}/events`).set(auth(fieldToken))
-    .send({ event_type: '소음 민원발생', memo: '외부에 나가면 안 되는 내부 기록',
-            needs_review: true });
+    .send({ event_type: '소음 민원발생', memo: '인근 상가 민원 접수',
+            event_date: '2027-03-02', needs_review: true });
   await request(app).post(`/api/cost/sites/${siteId}/costs`).set(auth(fieldToken))
     .send({ cost_date: '2027-03-02', cost_type: 'C03', amount: '777001', vendor: '주유소' });
 });
@@ -120,11 +120,12 @@ describe('§41 본사가 발급하고, 링크만으로 열람한다', () => {
     expect(delay.detail).toBe('60분 · 레미콘공장');
   });
 
-  it('★ 내부 사건(민원 등)은 외부에 나가지 않는다', async () => {
+  it('★ 특이사항 전 범위가 나간다 — 등록 사건 포함 (사용자 확인 2026-08-29)', async () => {
     const res = await request(app).get(`/api/share/${shareToken}`);
-    const text = JSON.stringify(res.body);
-    expect(text).not.toContain('민원');
-    expect(text).not.toContain('내부 기록');
+    const types = res.body.notes.map((n: { type: string }) => n.type);
+    expect(types).toContain('소음 민원발생');
+    const ev = res.body.notes.find((n: { type: string }) => n.type === '소음 민원발생');
+    expect(ev.detail).toContain('인근 상가 민원 접수');
   });
 
   it('★ 원가는 한 글자도 나가지 않는다 (§41)', async () => {

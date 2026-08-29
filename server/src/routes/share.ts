@@ -16,6 +16,7 @@ import { withSession } from '../db/pool.js';
 import { badRequest, notFound } from '../http/errors.js';
 import { requireAuth, requireRole } from '../http/context.js';
 import { compressHoleNumbers } from '../domain/holeRange.js';
+import { externalMessage, internalMessage, type ShareStatus } from '../domain/kakaoMessage.js';
 
 const EXTERNAL = { userId: null, role: 'EXTERNAL' as const };
 const uuid = z.string().uuid();
@@ -73,6 +74,39 @@ shareAdminRouter.get('/sites/:siteId/preview', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* ============================================ §40/§41 카카오톡 메시지 (PHASE 14) */
+/**
+ * §41 계약상대방용 메시지 — 토큰 발급과 함께 본문을 만들어 준다.
+ * 본사가 이 본문을 그대로 카카오톡에 붙여넣거나 공유한다 (§42).
+ */
+shareAdminRouter.post('/sites/:siteId/kakao-external', async (req, res, next) => {
+  try {
+    const siteId = uuid.parse(req.params.siteId);
+    const p = z.object({
+      report_date: isoDate.optional(),
+      valid_days: z.number().int().min(1).max(90).default(7),
+    }).safeParse(req.body);
+    if (!p.success) throw badRequest('발급 정보가 올바르지 않습니다.');
+    const date = p.data.report_date ?? new Date().toISOString().slice(0, 10);
+
+    const out = await withSession(req.actor!, async (c) => {
+      const issued = (await c.query('SELECT core.fn_issue_share($1,$2,$3) AS d',
+        [siteId, date, p.data.valid_days])).rows[0]!.d as { share_token: string };
+      const status = (await c.query('SELECT share.fn_daily_status($1,$2) AS d',
+        [siteId, date])).rows[0]!.d as ShareStatus & { today_hole_numbers: string[] };
+      return { issued, status };
+    });
+
+    const base = `${req.protocol}://${req.get('host')}`;
+    const url = `${base}/share/${out.issued.share_token}`;
+    const range = compressHoleNumbers(out.status.today_hole_numbers);
+    res.status(201).json({
+      share_token: out.issued.share_token,
+      url,
+      message: externalMessage(out.status, range, url),
+    });
+  } catch (e) { next(e); }
+});
 /* ==================================================== 외부: 토큰 열람 (로그인 없음) */
 export const sharePublicRouter = Router();
 

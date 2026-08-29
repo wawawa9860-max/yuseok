@@ -304,7 +304,7 @@ async function openMain() {
     <button id="goProgress">공정률 / 기성</button>
     <button id="goEvents">특이사항</button>
     <button id="goReport">오늘 보고서</button>
-    <button class="later" disabled>카카오톡 공유 · 준비중</button>
+    <button id="goKakao">카카오톡 공유</button>
     <div class="spacer"></div>
     <button class="ghost" id="switchSite">다른 현장 / 로그아웃</button>`;
 
@@ -321,6 +321,7 @@ async function openMain() {
   $('#goRegister').onclick = () => openRegister();
   $('#goProgress').onclick = openProgress;
   $('#goEvents').onclick = openEvents;
+  $('#goKakao').onclick = shareKakao;
   // openReport(date) 라서 그대로 넘기면 클릭 이벤트가 날짜 자리에 들어간다
   $('#goReport').onclick = () => openReport();
   $('#switchSite').onclick = () => {
@@ -801,6 +802,37 @@ async function renderGroundOptions() {
   });
 }
 
+/* ---------------------------------------------- §40 카카오톡 공유 (PHASE 14) */
+/*
+ * §42 "카카오톡에는 핵심 작업정보 + 대표 상태 + 상세보기 링크만."
+ * 서버가 §40 형식으로 조립한 본문을 받아 휴대폰 공유창을 연다.
+ * 공유창에서 카카오톡을 고르면 끝이다. 안 되는 기기는 복사로 대신한다.
+ */
+async function shareKakao() {
+  let m;
+  try {
+    const r = await api(`/field/sites/${state.siteId}/kakao-message`);
+    m = r.message;
+  } catch (e) { toast(e.message); return; }
+
+  if (navigator.share) {
+    try { await navigator.share({ text: m }); return; }
+    catch (e) { if (e.name === 'AbortError') return; /* 공유창 미지원 → 복사로 */ }
+  }
+  try {
+    await navigator.clipboard.writeText(m);
+    toast('보고 내용을 복사했습니다. 카카오톡에 붙여넣어 주십시오.', 4000);
+  } catch {
+    // 복사도 안 되면 화면에 보여주고 길게 눌러 복사하게 한다
+    app.innerHTML = `
+      <header class="site"><h1>카카오톡 공유</h1></header>
+      <div class="card"><pre style="white-space:pre-wrap;font-family:inherit;font-size:18px;margin:0">${m}</pre></div>
+      <p class="muted center" style="font-size:17px">내용을 길게 눌러 복사한 뒤 카카오톡에 붙여넣어 주십시오.</p>
+      <button class="ghost" id="back">돌아가기</button>`;
+    $('#back').onclick = openMain;
+  }
+}
+
 /* ------------------------------------------- §39 본사 대시보드 (PHASE 12) */
 /*
  * 현장별 한 줄. 이상현장에만 표시가 붙고, 그것만 눌러 상세를 본다.
@@ -925,16 +957,22 @@ async function openDashboardSite(siteId) {
     <button class="ghost" id="backDash">대시보드로</button>`;
   $('#issueShare').onclick = async () => {
     try {
-      const r = await api(`/admin/share/sites/${siteId}/issue`, {
+      // §41 메시지 본문 + 상세보기 링크를 한 번에 받는다
+      const r = await api(`/admin/share/sites/${siteId}/kakao-external`, {
         method: 'POST', body: JSON.stringify({}),
       });
-      const url = `${location.origin}${r.url}`;
       $('#shareResult').innerHTML = `
-        <div class="notice ok" style="word-break:break-all">${url}</div>
-        <button class="ghost" id="copyShare">링크 복사</button>`;
-      $('#copyShare').onclick = async () => {
-        try { await navigator.clipboard.writeText(url); toast('복사했습니다.'); }
-        catch { toast('길게 눌러 직접 복사해 주십시오.'); }
+        <div class="card" style="margin-top:12px">
+          <pre style="white-space:pre-wrap;font-family:inherit;font-size:17px;margin:0">${r.message}</pre>
+        </div>
+        <button class="ghost" id="shareMsg">카카오톡으로 보내기</button>`;
+      $('#shareMsg').onclick = async () => {
+        if (navigator.share) {
+          try { await navigator.share({ text: r.message }); return; }
+          catch (e) { if (e.name === 'AbortError') return; }
+        }
+        try { await navigator.clipboard.writeText(r.message); toast('복사했습니다. 카카오톡에 붙여넣어 주십시오.'); }
+        catch { toast('내용을 길게 눌러 복사해 주십시오.'); }
       };
     } catch (e) { toast(e.message); }
   };
