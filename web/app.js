@@ -915,7 +915,29 @@ async function openDashboardSite(siteId) {
       </table>
     </div>` : ''}
 
+    <div class="card">
+      <h2>계약상대방 공유 (§41)</h2>
+      <p class="muted" style="font-size:17px">원가 없는 작업현황 링크를 만듭니다. 7일 뒤 만료됩니다.</p>
+      <button class="ghost" id="issueShare">오늘 작업현황 링크 발급</button>
+      <div id="shareResult"></div>
+    </div>
+
     <button class="ghost" id="backDash">대시보드로</button>`;
+  $('#issueShare').onclick = async () => {
+    try {
+      const r = await api(`/admin/share/sites/${siteId}/issue`, {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      const url = `${location.origin}${r.url}`;
+      $('#shareResult').innerHTML = `
+        <div class="notice ok" style="word-break:break-all">${url}</div>
+        <button class="ghost" id="copyShare">링크 복사</button>`;
+      $('#copyShare').onclick = async () => {
+        try { await navigator.clipboard.writeText(url); toast('복사했습니다.'); }
+        catch { toast('길게 눌러 직접 복사해 주십시오.'); }
+      };
+    } catch (e) { toast(e.message); }
+  };
   $('#backDash').onclick = () => renderDashboard();
 }
 

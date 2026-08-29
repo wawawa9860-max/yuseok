@@ -17,6 +17,7 @@ import { reportRouter } from './routes/reports.js';
 import { paymentAdminRouter, progressRouter } from './routes/payment.js';
 import { eventRouter } from './routes/events.js';
 import { dashboardRouter } from './routes/dashboard.js';
+import { shareAdminRouter, sharePublicRouter } from './routes/share.js';
 import { HttpError } from './http/errors.js';
 import { logAccessDenied } from './http/context.js';
 
@@ -46,6 +47,8 @@ export function createApp() {
   app.use('/api/progress', progressRouter);
   app.use('/api/events', eventRouter);
   app.use('/api/admin/dashboard', dashboardRouter);
+  app.use('/api/admin/share', shareAdminRouter);
+  app.use(sharePublicRouter);   // /share/:token, /api/share/:token — 로그인 없음
   app.use('/api/admin/payment', paymentAdminRouter);
   app.use('/api/cost', costRouter);
   app.use('/api/admin/cost', costAdminRouter);
