@@ -136,7 +136,7 @@ Master Prompt는 사용자의 명시적 지시 없이 수정하지 않는다.
 ## 개발 순서 (Master Prompt §49)
 PHASE 1 구조/DB/권한 ✅ → 2 SITE/CONTRACT/HOLE ✅ → 3 GROUND ✅ → 4 수량산출서 ✅ → 5 작업도면 ✅
 → 6 오늘작업입력 ✅ → 7 레미콘/인원/장비 ✅ → 8 비용/증빙/보안 ✅ → 9 작업일보/천공일지 ✅
-→ 10 공정률/기성 ✅ → 11 SPECIAL_EVENT ✅ → 12 본사 대시보드 ✅ → 13 공유 분리 ✅ → 14 카카오톡 ✅ → 15 Pilot
+→ 10 공정률/기성 ✅ → 11 SPECIAL_EVENT ✅ → 12 본사 대시보드 ✅ → 13 공유 분리 ✅ → 14 카카오톡 ✅ → 15 Pilot ✅(시스템 준비 완료 — R20 실사용 시험 대기)
 
 각 Phase 종료 시 `docs/PHASE_XX_REPORT.md` 에 Master Prompt §50 의 10개 항목을 반드시 작성한다.
 
