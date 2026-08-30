@@ -1938,6 +1938,8 @@ async function boot() {
 
   try {
     state.user = me.user; state.sites = me.sites;
+    // §40 카카오톡 딥링크가 있으면 역할 분기보다 먼저 처리한다
+    if (location.hash && await openDeepLink()) return;
     // §39 본사는 현장 화면이 아니라 대시보드를 본다
     if (state.user?.role === 'HEAD_OFFICE') return openDashboard();
     if (state.sites.length === 0) return renderLogin('배정된 현장이 없습니다.');
@@ -1952,6 +1954,46 @@ async function boot() {
     await flushQueue();
   } catch (e) { renderLogin(e.message); }
 }
+
+/*
+ * §40 카카오톡 메시지의 상세보기 링크 (PHASE 15).
+ *   #report/<siteId>/<date>  → 그 현장·그 날짜의 작업일보로 직행
+ *   #cost/<siteId>/<date>    → 본사 원가 상세로 직행 (본사 로그인 필요 §29)
+ * 로그인이 안 되어 있으면 로그인 화면을 먼저 거치고, 로그인하면 이어서 열린다.
+ */
+async function openDeepLink() {
+  const m = location.hash.match(/^#(report|cost)\/([0-9a-f-]{36})(?:\/(\d{4}-\d{2}-\d{2}))?$/);
+  if (!m) return false;
+  const [, kind, siteId, date] = m;
+  history.replaceState(null, '', location.pathname);   // 한 번 쓰고 지운다
+
+  if (kind === 'cost') {
+    // §40 "본사 원가 상세보기는 본사 권한 인증 후에만"
+    if (state.user?.role !== 'HEAD_OFFICE') {
+      toast('본사 원가는 본사 계정으로만 볼 수 있습니다.', 4500);
+      return false;   // 자기 화면으로 평소처럼 진행
+    }
+    await openDashboard();
+    await openDashboardSite(siteId);
+    return true;
+  }
+
+  // report — 본사는 배정과 무관하게, 현장은 배정 현장만
+  if (state.user?.role === 'HEAD_OFFICE' || state.sites.some((s) => s.id === siteId)) {
+    state.siteId = siteId;
+    try { localStorage.setItem('rfcip.siteId', siteId); } catch { /* 무시 */ }
+    const t = await fetchWithCache('today', `/field/sites/${siteId}/today`);
+    state.today = t.data;
+    await openReport(date ?? state.today.date);
+    return true;
+  }
+  toast('배정되지 않은 현장입니다.', 4000);
+  return false;
+}
+
+window.addEventListener('hashchange', () => {
+  if (location.hash && state.user) void openDeepLink();
+});
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

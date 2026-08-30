@@ -97,7 +97,7 @@ shareAdminRouter.post('/sites/:siteId/kakao-external', async (req, res, next) =>
       return { issued, status };
     });
 
-    const base = `${req.protocol}://${req.get('host')}`;
+    const base = process.env.PUBLIC_BASE_URL ?? `${req.protocol}://${req.get('host')}`;
     const url = `${base}/share/${out.issued.share_token}`;
     const range = compressHoleNumbers(out.status.today_hole_numbers);
     res.status(201).json({
@@ -109,6 +109,29 @@ shareAdminRouter.post('/sites/:siteId/kakao-external', async (req, res, next) =>
 });
 /* ==================================================== 외부: 토큰 열람 (로그인 없음) */
 export const sharePublicRouter = Router();
+
+/*
+ * 공개 링크 속도 제한 (PHASE 15 Pilot 대비).
+ * 토큰이 128비트라 무차별 대입은 비현실적이지만, 그래도 시도 자체를 느리게 만든다.
+ * IP 당 분당 60회 — 정상 열람에는 전혀 걸리지 않는 수준이다.
+ */
+const RATE_LIMIT = 60;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+sharePublicRouter.use((req, res, nextFn) => {
+  if (!req.path.startsWith('/share') && !req.path.startsWith('/api/share')) return nextFn();
+  const ip = req.ip ?? 'unknown';
+  const now = Date.now();
+  let b = rateBuckets.get(ip);
+  if (!b || b.resetAt < now) { b = { count: 0, resetAt: now + 60_000 }; rateBuckets.set(ip, b); }
+  b.count += 1;
+  if (rateBuckets.size > 10_000) rateBuckets.clear();   // 메모리 상한
+  if (b.count > RATE_LIMIT) {
+    res.status(429).json({ error: 'TOO_MANY_REQUESTS',
+      message: '잠시 후 다시 열어 주십시오.' });
+    return;
+  }
+  nextFn();
+});
 
 sharePublicRouter.get('/api/share/:token', async (req, res, next) => {
   try {

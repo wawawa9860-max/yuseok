@@ -668,11 +668,15 @@ fieldRouter.get('/sites/:siteId/kakao-message', async (req, res, next) => {
       return { status, ev };
     });
 
-    const base = `${req.protocol}://${req.get('host')}`;
+    // 운영 도메인이 정해지면 PUBLIC_BASE_URL 하나만 바꾸면 된다.
+    const base = process.env.PUBLIC_BASE_URL ?? `${req.protocol}://${req.get('host')}`;
     const range = compressHoleNumbers(out.status.today_hole_numbers);
     res.json({
       message: internalMessage(out.status, range, out.ev,
-        `${base}/app/`, `${base}/app/`),
+        // 받은 사람이 누르면 그 현장·그 날짜 화면으로 바로 간다 (로그인 후)
+        `${base}/app/#report/${siteId}/${date}`,
+        // §40 본사 원가는 본사 로그인 뒤에만 열린다 (§29)
+        `${base}/app/#cost/${siteId}/${date}`),
     });
   } catch (e) { next(e); }
 });
