@@ -100,3 +100,34 @@ if (invokedDirectly) {
     .then((a) => { console.log(`[migrate] done (${a.length} applied)`); process.exit(0); })
     .catch((e) => { console.error(e); process.exit(1); });
 }
+
+/**
+ * 첫 부팅 부트스트랩 (PHASE 15 운영 보완).
+ * 계정이 하나도 없으면 INITIAL_ADMIN_PASSWORD 로 본사 계정을 만든다.
+ * 이후의 모든 계정은 웹 화면(계정 관리)에서 만든다 — psql 이 필요 없다.
+ */
+export async function bootstrapAdmin(): Promise<void> {
+  const client = await adminClient(env.DATABASE_NAME);
+  try {
+    const n = await client.query('SELECT count(*)::int AS n FROM core.app_user');
+    if (n.rows[0].n > 0) return;
+
+    const pw = process.env.INITIAL_ADMIN_PASSWORD;
+    const id = process.env.INITIAL_ADMIN_ID ?? 'admin';
+    if (!pw || pw.length < 8) {
+      console.log(
+        '\n  아직 계정이 없습니다. 환경변수 INITIAL_ADMIN_PASSWORD (8자 이상) 를'
+        + '\n  설정하고 다시 시작하면 본사 계정이 자동으로 만들어집니다.\n');
+      return;
+    }
+    const { hashPassword } = await import('../auth/password.js');
+    const hash = await hashPassword(pw);
+    await client.query(
+      `INSERT INTO core.app_user (login_id, password_hash, display_name, role)
+       VALUES ($1,$2,'본사 관리자','HEAD_OFFICE')`, [id, hash]);
+    console.log(`[bootstrap] 본사 계정 '${id}' 를 만들었습니다. 로그인 후 계정 관리에서 나머지를 만드십시오.`);
+  } finally {
+    await client.end();
+  }
+}
+

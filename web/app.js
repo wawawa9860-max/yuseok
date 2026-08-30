@@ -36,6 +36,7 @@ const state = {
   equipSame: null, equipChanges: [],
   readyMix: null,
   dashboard: null,     // §39 본사 대시보드
+  users: [],           // 계정 관리 (본사 전용)
   events: null,        // §31 특이사항
   eventTypes: [],
   newEvent: null,
@@ -879,12 +880,124 @@ function renderDashboard() {
         `<span class="flag">${f}</span>`).join('')}</div>` : ''}
     </div>`).join('')}
 
+    <button class="ghost" id="dashUsers">계정 관리</button>
     <button class="ghost" id="dashLogout">로그아웃</button>`;
 
   app.querySelectorAll('[data-site]').forEach((el) => {
     el.onclick = () => openDashboardSite(el.dataset.site);
   });
+  $('#dashUsers').onclick = () => openUsers();
   $('#dashLogout').onclick = () => { logout(); renderLogin(); };
+}
+
+/* -------------------------------------------- 계정 관리 (본사 전용, 웹에서 끝) */
+/*
+ * "어떤 파일을 들어가서 셋팅하는지 모르겠다" (사용자) → 파일을 만질 일이 없어야 한다.
+ * 현장관리자 계정 만들기·비밀번호 재설정·중지 전부 이 화면에서 한다.
+ */
+async function openUsers() {
+  let d;
+  try { d = await api('/admin/users'); }
+  catch (e) { toast(e.message); return; }
+  state.users = d.users;
+  renderUsers();
+}
+
+function renderUsers() {
+  const roleKo = { HEAD_OFFICE: '본사', FIELD_MANAGER: '현장관리자', EXTERNAL: '외부' };
+  const sites = state.dashboard?.sites ?? [];
+
+  app.innerHTML = `
+    <header class="site">
+      <h1>계정 관리</h1>
+      <div class="date">${state.users.length}개 계정</div>
+    </header>
+
+    ${state.users.map((u) => `
+    <div class="card" style="${u.is_active ? '' : 'opacity:.55'}">
+      <div class="siterow">
+        <div>
+          <b>${u.display_name}</b> <small class="muted">(${u.login_id})</small><br>
+          <small class="muted">${roleKo[u.role] ?? u.role}
+            ${u.sites?.length ? ' · ' + u.sites.join(', ') : ''}
+            ${u.is_active ? '' : ' · <b>중지됨</b>'}</small>
+        </div>
+        <div class="num">
+          <button class="ghost small" data-reset="${u.id}" data-name="${u.login_id}">비밀번호</button>
+          <button class="ghost small" data-toggle="${u.id}" data-active="${u.is_active}">
+            ${u.is_active ? '중지' : '재개'}</button>
+        </div>
+      </div>
+    </div>`).join('')}
+
+    <div class="card">
+      <h2>새 계정 만들기</h2>
+      <label class="field"><span class="label">아이디 (영문 소문자·숫자 3~30자)</span>
+        <input id="nuLogin" autocapitalize="off" autocomplete="off" placeholder="예: kim-field"></label>
+      <label class="field"><span class="label">이름</span>
+        <input id="nuName" placeholder="예: 김현장"></label>
+      <label class="field"><span class="label">비밀번호 (8자 이상)</span>
+        <input id="nuPw" autocapitalize="off" autocomplete="off" placeholder="정해서 당사자에게 전달"></label>
+      <label class="field"><span class="label">역할</span>
+        <select id="nuRole">
+          <option value="FIELD_MANAGER">현장관리자</option>
+          <option value="HEAD_OFFICE">본사</option>
+        </select></label>
+      ${sites.length ? `
+      <div class="field"><span class="label">배정 현장 (현장관리자만)</span>
+      ${sites.map((s) => `
+        <label class="sitecheck"><input type="checkbox" class="nuSite" value="${s.site_id}"> ${s.site_name}</label>`).join('')}
+      </div>` : ''}
+      <button id="nuCreate" class="primary">계정 만들기</button>
+    </div>
+
+    <button class="ghost" id="usersBack">대시보드로</button>`;
+
+  $('#nuCreate').onclick = async () => {
+    const login_id = $('#nuLogin').value.trim();
+    const display_name = $('#nuName').value.trim();
+    const password = $('#nuPw').value;
+    const role = $('#nuRole').value;
+    if (!login_id || !display_name || !password) return toast('아이디·이름·비밀번호를 모두 적어 주십시오.');
+    const site_ids = [...app.querySelectorAll('.nuSite:checked')].map((el) => el.value);
+    try {
+      await api('/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({ login_id, display_name, password, role,
+          site_ids: role === 'FIELD_MANAGER' ? site_ids : [] }),
+      });
+      toast(`'${login_id}' 계정을 만들었습니다. 아이디와 비밀번호를 당사자에게 전달해 주십시오.`, 5000);
+      openUsers();
+    } catch (e) { toast(e.message); }
+  };
+
+  app.querySelectorAll('[data-reset]').forEach((el) => {
+    el.onclick = async () => {
+      const pw = prompt(`'${el.dataset.name}' 의 새 비밀번호 (8자 이상)`);
+      if (pw === null) return;
+      try {
+        await api(`/admin/users/${el.dataset.reset}/reset-password`, {
+          method: 'POST', body: JSON.stringify({ password: pw }),
+        });
+        toast('비밀번호를 바꿨습니다. 당사자에게 전달해 주십시오.', 5000);
+      } catch (e) { toast(e.message); }
+    };
+  });
+
+  app.querySelectorAll('[data-toggle]').forEach((el) => {
+    el.onclick = async () => {
+      const active = el.dataset.active === 'true';
+      try {
+        await api(`/admin/users/${el.dataset.toggle}`, {
+          method: 'PATCH', body: JSON.stringify({ is_active: !active }),
+        });
+        toast(active ? '계정을 중지했습니다.' : '계정을 다시 사용할 수 있습니다.');
+        openUsers();
+      } catch (e) { toast(e.message); }
+    };
+  });
+
+  $('#usersBack').onclick = () => renderDashboard();
 }
 
 /** 이상현장 클릭 → 상세. §29 원가 합계는 여기서만 나온다. */

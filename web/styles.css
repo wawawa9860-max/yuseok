@@ -117,10 +117,24 @@ table.summary tr:last-child td { border-bottom: 0; }
 
 label.field { display: block; margin-top: 14px; }
 label.field .label { font-size: 17px; color: var(--muted); }
-label.field input, label.field textarea {
+label.field input, label.field textarea, label.field select {
   width: 100%; min-height: 56px; font-size: 19px; font-family: inherit;
   border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 6px;
+  background: var(--card); color: var(--ink);
 }
+
+/* 계정 관리 — 목록 행의 작은 동작 버튼과 현장 배정 체크 */
+button.small {
+  display: inline-flex; width: auto; min-height: 44px;
+  font-size: 17px; font-weight: 600; margin-top: 6px; padding: 0 12px;
+}
+div.field { margin-top: 14px; }
+div.field .label { font-size: 17px; color: var(--muted); }
+label.sitecheck {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 19px; min-height: 48px; margin-top: 4px;
+}
+label.sitecheck input { width: 24px; height: 24px; }
 
 .hidden { display: none !important; }
 .muted { color: var(--muted); }

@@ -18,6 +18,7 @@ import { paymentAdminRouter, progressRouter } from './routes/payment.js';
 import { eventRouter } from './routes/events.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { shareAdminRouter, sharePublicRouter } from './routes/share.js';
+import { adminUserRouter } from './routes/admin-users.js';
 import { HttpError } from './http/errors.js';
 import { logAccessDenied } from './http/context.js';
 
@@ -48,6 +49,7 @@ export function createApp() {
   app.use('/api/events', eventRouter);
   app.use('/api/admin/dashboard', dashboardRouter);
   app.use('/api/admin/share', shareAdminRouter);
+  app.use('/api/admin/users', adminUserRouter);
   app.use(sharePublicRouter);   // /share/:token, /api/share/:token — 로그인 없음
   app.use('/api/admin/payment', paymentAdminRouter);
   app.use('/api/cost', costRouter);
@@ -59,6 +61,10 @@ export function createApp() {
   app.use(async (err: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof HttpError) {
       return res.status(err.status).json({ error: err.code, message: err.message });
+    }
+    // 경로 파라미터가 형식에 안 맞는 경우 (uuid.parse 등) — 서버 오류가 아니라 잘못된 요청이다
+    if ((err as { name?: string }).name === 'ZodError') {
+      return res.status(400).json({ error: 'BAD_REQUEST', message: '요청 형식이 올바르지 않습니다.' });
     }
     const pgErr = err as { code?: string; message?: string };
     // DB 가 마지막 방어선에서 막은 경우도 403 으로 처리하고 기록한다 (§29, §43).

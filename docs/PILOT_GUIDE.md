@@ -5,41 +5,43 @@
 
 ---
 
-## 1단계 — 서버 준비
+## 1~3단계 — 서버 준비 (둘 중 하나)
 
-사무실 PC 또는 임대서버 1대 (Windows/Mac/Linux 무관, Node.js 20+ 와 PostgreSQL 16).
+**방법 A — 클라우드 (권장, 클릭만): `docs/CLOUD_DEPLOY_GUIDE.md` 순서대로.**
+서버·DB·https 주소가 자동으로 생기고, DB 구조와 본사 계정까지 자동으로 만들어집니다.
+끝나면 바로 이 문서 **5단계**로 오시면 됩니다.
+
+**방법 B — 사무실 PC 직접 설치** (Node.js 20+ 와 PostgreSQL 16):
 
 ```bash
 git clone <저장소 주소>
 cd yuseok/server
-cp .env.example .env      # 열어서 값을 채운다 (2단계)
+cp .env.example .env      # 열어서 값을 채운다 (아래 표)
 npm install
 ```
-
-## 2단계 — .env 채우기 (운영 필수)
 
 `.env.example` 의 주석대로 채웁니다. **세 가지는 반드시 바꿔야 합니다** —
 안 바꾸면 운영 모드(NODE_ENV=production)에서 서버가 이유를 말하고 켜지지 않습니다.
 
 | 항목 | 만드는 법 |
 |---|---|
-| `JWT_SECRET` | `openssl rand -hex 32` 결과를 붙여넣기 |
-| `APP_DB_PASSWORD` | 강한 비밀번호. `DATABASE_URL` 안의 비밀번호도 같이 바꾼다 |
-| `PUBLIC_BASE_URL` | 운영 도메인 (예: `https://rfcip.회사도메인.com`). 카카오톡 링크가 이 주소로 만들어진다 |
-
-## 3단계 — DB 초기화 + 서버 시작
+| `JWT_SECRET` | 아무 문자열 32자 이상 (`openssl rand -hex 32` 결과 권장) |
+| `APP_DB_PASSWORD` | 강한 비밀번호 (`DATABASE_URL` 은 비워 두면 자동 조립됩니다) |
+| `PUBLIC_BASE_URL` | 운영 주소 (예: `https://rfcip.회사도메인.com`). 카카오톡 링크가 이 주소로 만들어진다 |
 
 ```bash
-npm run db:migrate            # 스키마 생성 (시드 없이)
-NODE_ENV=production npm run build && NODE_ENV=production npm start
+NODE_ENV=production INITIAL_ADMIN_PASSWORD=본사비밀번호 npm run build && \
+NODE_ENV=production INITIAL_ADMIN_PASSWORD=본사비밀번호 npm start
 ```
 
-화면에 접속 주소와 QR 코드가 나옵니다.
+켜지면서 DB 구조 적용과 본사 계정(`admin`) 생성이 자동으로 됩니다.
 
-## 4단계 — 계정 만들기
+## 4단계 — 계정 만들기 (웹에서)
 
-본사 계정 1개, 현장관리자 계정 1개. (초기엔 psql 로 직접 넣거나,
-개발팀에 요청 — 계정 관리 화면은 Pilot 피드백 후 붙입니다.)
+`admin` 으로 로그인 → 본사 대시보드 → **[계정 관리]** →
+현장관리자 계정을 만들고 아이디·비밀번호를 당사자에게 전달합니다.
+비밀번호를 잊으면 같은 화면에서 재설정하고, 퇴사자는 지우지 말고 **중지**합니다.
+psql 도 파일 수정도 필요 없습니다.
 
 ## 5단계 — 현장 최초설정 (본사, PC 권장)
 

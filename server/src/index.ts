@@ -18,6 +18,17 @@ function lanAddresses(): string[] {
   return out;
 }
 
+/*
+ * 운영에서는 시작할 때 마이그레이션과 첫 계정 부트스트랩을 자동으로 돈다 (PHASE 15).
+ * "어떤 파일을 들어가서 뭘 실행해야 하나" 를 없애기 위해서다 — 켜는 것 하나면 된다.
+ * 개발(tsx watch)에서는 db:reset 을 따로 쓰므로 건드리지 않는다.
+ */
+if (process.env.NODE_ENV === 'production' || process.env.AUTO_MIGRATE === '1') {
+  const { migrate, bootstrapAdmin } = await import('./db/migrate.js');
+  await migrate(false);
+  await bootstrapAdmin();
+}
+
 const server = createApp();
 
 const listener = server.listen(env.PORT, () => {

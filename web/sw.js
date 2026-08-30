@@ -2,7 +2,7 @@
  * 현장은 통신이 끊기는 곳이 많다. 화면 자체는 캐시해 두어
  * 앱이 열리지 않는 상황을 막는다. 데이터는 캐시하지 않는다.
  */
-const SHELL = 'rfcip-shell-v2';
+const SHELL = 'rfcip-shell-v3'; // v3: 계정 관리 화면 (app.js/styles.css 갱신)
 // app.js 가 import 하는 모듈까지 전부 넣어야 한다.
 // pick.js / queue.js 가 빠지면 통신이 끊긴 채로 앱을 열 때
 // 모듈을 못 받아 화면이 아예 뜨지 않는다.
